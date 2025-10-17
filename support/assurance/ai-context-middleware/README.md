@@ -219,9 +219,8 @@ SELECT 'table' AS component,
        TRUE AS sort,
        'SCF #' AS markdown,
        TRUE AS search; 
-     
-);             
-SELECT '[' || scf_no || '](scf-prompt-details.sql?regime_raw_value=' || 
+                 
+SELECT '[' || regime_raw_value || '](scf-prompt-details.sql?regime_raw_value=' || 
        regime_raw_value|| ')' AS "SCF #",
        scf_control AS  "Regime Marker",
        scf_control_question AS "SCF Control Question"
@@ -240,6 +239,27 @@ SELECT 'text' AS component,
        $page_title || ' for SCF # ' || $scf_no AS title;
  
 ${paginate("scf_regime_control", "WHERE scf_no = $scf_no")}
+
+      -- First card for accordion (frontmatter details)
+      SELECT 'html' AS component,
+      '<details open>
+      <summary>Frontmatter details</summary>
+      <div>' AS html;
+     
+      SELECT 'card' AS component, 1 as columns;
+     
+      SELECT
+     a.title AS "Title",
+     a.frontmatter_control_question AS description_md,
+     a.frontmatter_control_id AS description_md,
+     a.frontmatter_control_id AS description_md,
+     a.fiiId AS description_md,
+     a.frontmatter_summary AS description_md
+
+      FROM ai_ctxe_view_uniform_resource_compliance a
+      where frontmatter_control_id=$regime_raw_value
+     
+      SELECT 'html' AS component, '</div></details>' AS html;
  
 SELECT
   'card' AS component,
