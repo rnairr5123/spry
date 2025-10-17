@@ -156,12 +156,20 @@ ${paginate("scf_regime_control", "WHERE scf_no = $scf_no")}
   '' AS title,
   1 AS columns;
 
-  SELECT
-        '**SCF Domain:** ' || scf_domain || '  \n\n' ||
-        '**Control Question:** ' || scf_control_question || '  \n\n' ||
-        '**FII ID:** ' || fii_id || '  \n\n'  AS description_md
-       FROM aictxe_regime_control_standardized a
-      WHERE regime_raw_value=$regime_raw_value AND fii_id=$fii_id AND regime=$regime;
+SELECT 
+  '**SCF Domain:** ' || scf_domain || '
+
+' || 
+  '**Control Question:** ' || scf_control_question || '
+
+' || 
+  '**FII ID:** ' || fii_id || '
+
+' AS description_md 
+FROM aictxe_regime_control_standardized 
+WHERE regime_raw_value = $regime_raw_value 
+  AND fii_id = $fii_id 
+  AND regime = $regime;
      
       
  
@@ -169,7 +177,25 @@ SELECT
   'card' AS component,
   '' AS title,
   1 AS columns;
-SELECT  
-body_text AS description_md
-      FROM ai_ctxe_view_uniform_resource_compliance  where frontmatter_control_id=$regime_raw_value AND fiiId=$fii_id AND regimeType = $regime;
+
+  -- Accordion OPEN
+
+-- Accordion OPEN
+SELECT 'html' AS component, html
+FROM ui_policy_audit_accordion_open 
+
+UNION ALL 
+
+SELECT 'html' AS component, 
+       '<div class="accordion-content">' || body_text || '</div>' AS html
+FROM ai_ctxe_author_prompt 
+WHERE frontmatter_control_id = $regime_raw_value 
+  AND fiiId = $fii_id 
+  AND regimeType = $regime 
+
+UNION ALL 
+
+SELECT 'html' AS component, html
+FROM ui_policy_audit_accordion_close;
+
 ```

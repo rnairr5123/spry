@@ -579,7 +579,6 @@ SELECT DISTINCT
     base.created_by,
     base.content,
     base.frontmatter,
-    json_extract(base.frontmatter, '$.description') AS summary,
     base.merge_group,
     base.ord,
     base.body_text,
@@ -594,7 +593,9 @@ SELECT DISTINCT
     json_extract(base.frontmatter, '$.control-question') AS frontmatter_control_question,
     json_extract(base.frontmatter, '$.control-id') AS frontmatter_control_id,
     json_extract(base.frontmatter, '$.fiiId') AS fiiId,
-    json_extract(base.frontmatter, '$.regimeType') AS regimeType
+    json_extract(base.frontmatter, '$.regimeType') AS regimeType,
+    json_extract(base.frontmatter, '$.documentType') AS document_type
+
 
 FROM ai_ctxe_uniform_resource_base base
 INNER JOIN ur_ingest_session_fs_path_entry fs
@@ -605,6 +606,8 @@ WHERE (
   AND (fs.file_basename LIKE '%.prompt.md' 
     OR fs.file_basename LIKE '%.prompt-snippet.md' 
     OR fs.file_basename LIKE '%-prompt-meta.md');
+
+
 
 -- ============================================================================
 -- AI Context Middleware Analytics Catalog
@@ -667,6 +670,90 @@ WITH entries(view_schema, view_name, title, description) AS (
 )
 SELECT * FROM entries;
 
+-- ============================================================================
+-- audit prompt data
+-- ============================================================================
+DROP VIEW IF EXISTS ai_ctxe_audit_prompt;
+CREATE VIEW ai_ctxe_audit_prompt AS
+SELECT * from ai_ctxe_view_uniform_resource_compliance where document_type='Audit Prompt';
+-- ============================================================================
+--author prompt
+-- ============================================================================
+DROP VIEW IF EXISTS ai_ctxe_author_prompt;
+CREATE VIEW ai_ctxe_author_prompt AS
+SELECT * from ai_ctxe_view_uniform_resource_compliance where document_type='Author Prompt';
+
+-- ============================================================================
+--accordion 
+-- ============================================================================
+DROP VIEW IF EXISTS ui_policy_audit_accordion;
+
+DROP VIEW IF EXISTS ui_policy_audit_accordion_open;
+
+CREATE VIEW ui_policy_audit_accordion_open AS
+SELECT 'html' AS component, '
+<details class="test-detail-outer-accordion" open>
+  <summary class="test-detail-outer-summary">
+    Policy Audit Prompt
+  </summary>
+  <div class="test-detail-outer-content">
+' AS html;
 
 
+DROP VIEW IF EXISTS ui_policy_audit_accordion_close;
+CREATE VIEW ui_policy_audit_accordion_close AS
+SELECT 'html' AS component, '
+  </div>
+</details>
+<style>
+  .test-detail-outer-accordion {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    margin: 20px 0;
+    overflow: hidden;
+  }
+
+  .test-detail-outer-summary {
+    background-color: #f5f5f5;
+    padding: 15px 20px;
+    cursor: pointer;
+    font-weight: 600;
+    color: #333;
+    border: none;
+    outline: none;
+    user-select: none;
+    position: relative;
+    transition: background-color 0.2s;
+  }
+
+  .test-detail-outer-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .test-detail-outer-summary::after {
+    content: "+";
+    position: absolute;
+    right: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 18px;
+    font-weight: bold;
+    color: #666;
+  }
+
+  .test-detail-outer-accordion[open] .test-detail-outer-summary::after {
+    content: "−";
+  }
+
+  .test-detail-outer-summary:hover {
+    background-color: #ebebeb;
+  }
+
+  .test-detail-outer-content {
+    padding: 20px;
+    background-color: white;
+    border-top: 1px solid #ddd;
+  }
+</style>
+' AS html;
 
