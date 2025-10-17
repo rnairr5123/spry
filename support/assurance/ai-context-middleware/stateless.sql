@@ -564,16 +564,14 @@ WHERE ur.deleted_at IS NULL
       json_extract(urt.elaboration, '$.validation.status') = 'success'
   );
 
-
+-- ============================================================================
+-- explorr prompt view
+-- ============================================================================
 DROP VIEW IF EXISTS ai_ctxe_view_uniform_resource_compliance;
 CREATE VIEW ai_ctxe_view_uniform_resource_compliance AS
 SELECT DISTINCT
     base.uniform_resource_id,
     base.uri,
-
-    -- Extract regime from URI
-
-
     base.filename,
     base.created_at,
     base.created_by,
@@ -684,110 +682,8 @@ CREATE VIEW ai_ctxe_author_prompt AS
 SELECT * from ai_ctxe_view_uniform_resource_compliance where document_type='Author Prompt';
 
 -- ============================================================================
---accordion 
+--policy view
 -- ============================================================================
-DROP VIEW IF EXISTS ui_policy_audit_accordion;
-
-DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_open_audit;
-
-CREATE VIEW ai_ctxe_ui_policy_audit_accordion_open_audit AS
-SELECT 'html' AS component, '
-<details class="test-detail-outer-accordion" open>
-  <summary class="test-detail-outer-summary">
-    Policy Audit Prompt
-  </summary>
-  <div class="test-detail-outer-content">
-' AS html;
-
-DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_open_author;
-
-CREATE VIEW ai_ctxe_ui_policy_audit_accordion_open_author AS
-SELECT 'html' AS component, '
-<details class="test-detail-outer-accordion" open>
-  <summary class="test-detail-outer-summary">
-    Policy Author Prompt
-  </summary>
-  <div class="test-detail-outer-content">
-' AS html;
-
-DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_open_policy;
-CREATE VIEW ai_ctxe_ui_policy_audit_accordion_open_policy AS
-SELECT 'html' AS component, '
-<details class="test-detail-outer-accordion" open>
-  <summary class="test-detail-outer-summary">
-    Policy
-  </summary>
-  <div class="test-detail-outer-content">
-' AS html;
-
-
-DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_close;
-CREATE VIEW ai_ctxe_ui_policy_audit_accordion_close AS
-SELECT 'html' AS component, '
-  </div>
-</details>
-<style>
-  .test-detail-outer-accordion {
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    margin: 20px 0;
-    overflow: hidden;
-  }
-
-  .test-detail-outer-summary {
-    background-color: #f5f5f5;
-    padding: 15px 20px;
-    cursor: pointer;
-    font-weight: 600;
-    color: #333;
-    border: none;
-    outline: none;
-    user-select: none;
-    position: relative;
-    transition: background-color 0.2s;
-  }
-
-  .test-detail-outer-summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .test-detail-outer-summary::after {
-    content: "+";
-    position: absolute;
-    right: 20px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 18px;
-    font-weight: bold;
-    color: #666;
-  }
-
-  .test-detail-outer-accordion[open] .test-detail-outer-summary::after {
-    content: "−";
-  }
-
-  .test-detail-outer-summary:hover {
-    background-color: #ebebeb;
-  }
-
-  .test-detail-outer-content {
-    padding: 20px;
-    background-color: white;
-    border-top: 1px solid #ddd;
-  }
-</style>
-' AS html;
-
--- Create a view with hard-coded labels
-DROP VIEW IF EXISTS ai_ctxe_ui_labels_control_description;
-CREATE VIEW ai_ctxe_ui_labels_control_description AS
-SELECT 
-  '**SCF Domain:** ' AS label_scf_domain,
-  '**Control Question:** ' AS label_control_question,
-  '**FII ID:** ' AS label_fii_id,
-  '
-
-' AS newline;
 
 DROP VIEW IF EXISTS ai_ctxe_policy;
 CREATE VIEW ai_ctxe_policy AS
