@@ -688,9 +688,9 @@ SELECT * from ai_ctxe_view_uniform_resource_compliance where document_type='Auth
 -- ============================================================================
 DROP VIEW IF EXISTS ui_policy_audit_accordion;
 
-DROP VIEW IF EXISTS ui_policy_audit_accordion_open;
+DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_open_audit;
 
-CREATE VIEW ui_policy_audit_accordion_open AS
+CREATE VIEW ai_ctxe_ui_policy_audit_accordion_open_audit AS
 SELECT 'html' AS component, '
 <details class="test-detail-outer-accordion" open>
   <summary class="test-detail-outer-summary">
@@ -699,9 +699,30 @@ SELECT 'html' AS component, '
   <div class="test-detail-outer-content">
 ' AS html;
 
+DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_open_author;
 
-DROP VIEW IF EXISTS ui_policy_audit_accordion_close;
-CREATE VIEW ui_policy_audit_accordion_close AS
+CREATE VIEW ai_ctxe_ui_policy_audit_accordion_open_author AS
+SELECT 'html' AS component, '
+<details class="test-detail-outer-accordion" open>
+  <summary class="test-detail-outer-summary">
+    Policy Author Prompt
+  </summary>
+  <div class="test-detail-outer-content">
+' AS html;
+
+DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_open_policy;
+CREATE VIEW ai_ctxe_ui_policy_audit_accordion_open_policy AS
+SELECT 'html' AS component, '
+<details class="test-detail-outer-accordion" open>
+  <summary class="test-detail-outer-summary">
+    Policy
+  </summary>
+  <div class="test-detail-outer-content">
+' AS html;
+
+
+DROP VIEW IF EXISTS ai_ctxe_ui_policy_audit_accordion_close;
+CREATE VIEW ai_ctxe_ui_policy_audit_accordion_close AS
 SELECT 'html' AS component, '
   </div>
 </details>
@@ -756,4 +777,51 @@ SELECT 'html' AS component, '
   }
 </style>
 ' AS html;
+
+-- Create a view with hard-coded labels
+DROP VIEW IF EXISTS ai_ctxe_ui_labels_control_description;
+CREATE VIEW ai_ctxe_ui_labels_control_description AS
+SELECT 
+  '**SCF Domain:** ' AS label_scf_domain,
+  '**Control Question:** ' AS label_control_question,
+  '**FII ID:** ' AS label_fii_id,
+  '
+
+' AS newline;
+
+DROP VIEW IF EXISTS ai_ctxe_policy;
+CREATE VIEW ai_ctxe_policy AS
+SELECT DISTINCT
+  ur.uniform_resource_id,
+  json_extract(ur.frontmatter, '$.title') AS title,
+  json_extract(ur.frontmatter, '$.description') AS description,
+  json_extract(ur.frontmatter, '$.publishDate') AS publishDate,
+  json_extract(ur.frontmatter, '$.publishBy') AS publishBy,
+  json_extract(ur.frontmatter, '$.classification') AS classification,
+  json_extract(ur.frontmatter, '$.documentType') AS documentType,
+  json_extract(ur.frontmatter, '$.approvedBy') AS approvedBy,
+  json_extract(ur.frontmatter, '$.category') AS category,
+  json_extract(ur.frontmatter, '$.control-id') AS control_id,
+  json_extract(ur.frontmatter, '$.regimeType') AS regimeType,
+  json_extract(ur.frontmatter, '$.category[1]') AS category_type,
+  json_extract(ur.frontmatter,'$.fiiId') AS fii_id,
+ 
+  TRIM(
+    CASE
+      WHEN instr(ur.content, '---') = 1
+        THEN substr(
+          ur.content,
+          instr(ur.content, '---') + 3 + instr(substr(ur.content, instr(ur.content, '---') + 3), '---') + 3
+        )
+      ELSE ur.content
+    END
+  ) AS body_text
+FROM
+  uniform_resource ur
+JOIN
+  ur_ingest_session_fs_path_entry fs
+    ON fs.uniform_resource_id = ur.uniform_resource_id
+
+WHERE
+  fs.file_basename LIKE '%.policy.md';
 

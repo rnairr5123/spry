@@ -157,16 +157,11 @@ ${paginate("scf_regime_control", "WHERE scf_no = $scf_no")}
   1 AS columns;
 
 SELECT 
-  '**SCF Domain:** ' || scf_domain || '
-
-' || 
-  '**Control Question:** ' || scf_control_question || '
-
-' || 
-  '**FII ID:** ' || fii_id || '
-
-' AS description_md 
+  labels.label_scf_domain || scf_domain || labels.newline || 
+  labels.label_control_question || scf_control_question || labels.newline || 
+  labels.label_fii_id || fii_id || labels.newline AS description_md 
 FROM aictxe_regime_control_standardized 
+CROSS JOIN ai_ctxe_ui_labels_control_description AS labels
 WHERE regime_raw_value = $regime_raw_value 
   AND fii_id = $fii_id 
   AND regime = $regime;
@@ -182,7 +177,7 @@ SELECT
 
 -- Accordion OPEN
 SELECT 'html' AS component, html
-FROM ui_policy_audit_accordion_open 
+FROM ai_ctxe_ui_policy_audit_accordion_open_author 
 
 UNION ALL 
 
@@ -196,6 +191,45 @@ WHERE frontmatter_control_id = $regime_raw_value
 UNION ALL 
 
 SELECT 'html' AS component, html
-FROM ui_policy_audit_accordion_close;
+FROM ai_ctxe_ui_policy_audit_accordion_close;
+-- audit ptompt
+
+SELECT 'html' AS component, html
+FROM ai_ctxe_ui_policy_audit_accordion_open_audit
+
+UNION ALL 
+
+SELECT 'html' AS component, 
+       '<div class="accordion-content">' || body_text || '</div>' AS html
+FROM ai_ctxe_audit_prompt 
+WHERE frontmatter_control_id = $regime_raw_value 
+  AND fiiId = $fii_id 
+  AND regimeType = $regime 
+
+UNION ALL 
+
+SELECT 'html' AS component, html
+FROM ai_ctxe_ui_policy_audit_accordion_close;
+
+--policy
+SELECT 'html' AS component, html
+FROM ai_ctxe_ui_policy_audit_accordion_open_policy
+
+UNION ALL 
+
+SELECT 'html' AS component, 
+       '<div class="accordion-content">' || body_text || '</div>' AS html
+FROM ai_ctxe_policy 
+WHERE control_id = $regime_raw_value 
+  AND fii_id = $fii_id 
+  AND regimeType = $regime 
+
+UNION ALL 
+
+SELECT 'html' AS component, html
+FROM ai_ctxe_ui_policy_audit_accordion_close;
+
+
+
 
 ```
