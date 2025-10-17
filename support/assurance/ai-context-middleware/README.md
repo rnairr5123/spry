@@ -5,7 +5,7 @@ sqlpage-conf:
   allow_exec: true
   port: 9227
 ---
-## Secure Controls Framework (SCF) Exploration
+## AI Context Middleware
 
 This script automates the conversion of the latest Secure Controls Framework
 (SCF) Excel workbook from the
@@ -71,99 +71,7 @@ WHERE nn.is_index <> 1
 
 # AI Context Engineering Pages
 
-```sql ai-context-engineering/compliance.sql { route: { caption: "Compliance Overview" } }
-SELECT 'text' AS component,
-       $page_title AS title;
 
-SELECT 'card' AS component,
-       3 AS columns;
-
--- -- HIPAA compliance card
--- SELECT '## Total Counts of HIPAA Prompt Modules' AS description_md,
---        'white' AS background_color,
---        '## ' || count(DISTINCT uniform_resource_id) AS description_md,
---        '12' AS width,
---        'pink' AS color,
---        'timeline-event' AS icon,
---        'background-color: #FFFFFF' AS style,
---        ${ctx.absUrlUnquoted("'/ai-context-engineering/prompts-complaince-hipaa.sql'")} AS link
--- FROM ai_ctxe_view_uniform_resource_complaince 
--- WHERE regime = 'HIPAA';
-
--- -- SOC2 compliance card
--- SELECT '## Total Counts of SOC2 Prompt Modules' AS description_md,
---        'white' AS background_color,
---        '## ' || count(DISTINCT uniform_resource_id) AS description_md,
---        '12' AS width,
---        'blue' AS color,
---        'timeline-event' AS icon,
---        'background-color: #FFFFFF' AS style,
---        ${ctx.absUrlUnquoted("'/ai-context-engineering/prompts-complaince-soc.sql'")} AS link
--- FROM ai_ctxe_view_uniform_resource_complaince 
--- WHERE regime = 'SOC2';
--- ```
-
-```sql ai-context-engineering/index.sql { route: { caption: "AI Context Engineering" } }
-SELECT 'text' AS component,
-       $page_title AS title;
-
-SELECT 'card' AS component,
-       '' AS title,
-       2 AS columns;
-
--- Dynamic navigation discovery
-SELECT json_extract(np.json, '$.caption') AS title,
-       json_extract(np.json, '$.caption') AS description_md,
-       ${ctx.absUrlUnquoted("nn.path")} AS link
-FROM navigation_node AS nn
-INNER JOIN navigation_payload AS np
-  ON nn.path = np.path
-WHERE nn.is_index <> 1 
-  AND nn.virtual <> 1 
-  AND nn.parent_path = '/ai-context-engineering';
-```
-
-```sql ai-context-engineering/prompts-complaince-hipaa.sql { route: { caption: "HIPAA Compliance Prompts" } }
-SELECT 'text' AS component,
-       $page_title AS title;
-
-${paginate("ai_ctxe_view_uniform_resource_complaince", "WHERE regime='HIPAA'")}
-
-SELECT 'table' AS component,
-       TRUE AS sort,
-       TRUE AS search;
-
-SELECT uniform_resource_id AS "Resource ID",
-       regime AS "Regime",
-       created_at AS "Created"
-FROM ai_ctxe_view_uniform_resource_complaince 
-WHERE regime = 'HIPAA'
-ORDER BY created_at DESC
-${pagination.limit};
-
-${pagination.navigation}
-```
-
-```sql ai-context-engineering/prompts-complaince-soc.sql { route: { caption: "SOC2 Compliance Prompts" } }
-SELECT 'text' AS component,
-       $page_title AS title;
-
-${paginate("ai_ctxe_view_uniform_resource_complaince", "WHERE regime='SOC2'")}
-
-SELECT 'table' AS component,
-       TRUE AS sort,
-       TRUE AS search;
-
-SELECT uniform_resource_id AS "Resource ID",
-       regime AS "Regime",
-       created_at AS "Created"
-FROM ai_ctxe_view_uniform_resource_complaince 
-WHERE regime = 'SOC2'
-ORDER BY created_at DESC
-${pagination.limit};
-
-${pagination.navigation}
-```
 
 ```sql ai-context/opsfolio.sql { route: { caption: "OpsFolio Prompts" } }
 SELECT 'text' AS component,
@@ -219,12 +127,15 @@ SELECT 'table' AS component,
        TRUE AS sort,
        'SCF #' AS markdown,
        TRUE AS search; 
-                 
-SELECT '[' || regime_raw_value || '](scf-prompt-details.sql?regime_raw_value=' || 
-       regime_raw_value|| ')' AS "SCF #",
+SELECT '[' || regime_raw_value || '](' ||
+       'scf-prompt-details.sql?' ||
+       'regime_raw_value=' || REPLACE(REPLACE(regime_raw_value, ' ', ''), '/', '') ||
+       '&regime=' || REPLACE(REPLACE(regime_label, ' ', ''), '/', '') ||
+       '&fii_id=' || fii_id ||
+       ')' AS "SCF #",
        scf_control AS  "Regime Marker",
        scf_control_question AS "SCF Control Question"
-FROM scf_regime_control
+FROM aictxe_regime_control_standardized
 WHERE regime_label = $regime
 ORDER BY scf_no
 ${pagination.limit};
@@ -241,25 +152,23 @@ SELECT 'text' AS component,
 ${paginate("scf_regime_control", "WHERE scf_no = $scf_no")}
 
       -- First card for accordion (frontmatter details)
-      SELECT 'html' AS component,
-      '<details open>
-      <summary>Frontmatter details</summary>
-      <div>' AS html;
+   
      
-      SELECT 'card' AS component, 1 as columns;
+     SELECT
+  'card' AS component,
+  '' AS title,
+  1 AS columns;
+
      
       SELECT
-     a.title AS "Title",
-     a.frontmatter_control_question AS description_md,
-     a.frontmatter_control_id AS description_md,
-     a.frontmatter_control_id AS description_md,
-     a.fiiId AS description_md,
-     a.frontmatter_summary AS description_md
+       '\n **SCF Domain** : ' ||a.scf_domain AS description_md,
 
-      FROM ai_ctxe_view_uniform_resource_compliance a
-      where frontmatter_control_id=$regime_raw_value
+       '\n **Control Question** : ' ||a.scf_control_question AS description_md
+
+      FROM aictxe_regime_control_standardized a
+      where regime_raw_value=$regime_raw_value and fii_id=$fiid_id and regime=$regime;
      
-      SELECT 'html' AS component, '</div></details>' AS html;
+      
  
 SELECT
   'card' AS component,
@@ -267,5 +176,5 @@ SELECT
   1 AS columns;
 SELECT  
 body_text AS description_md
-      FROM ai_ctxe_view_uniform_resource_compliance  where frontmatter_control_id=$regime_raw_value
+      FROM ai_ctxe_view_uniform_resource_compliance  where frontmatter_control_id=$regime_raw_value ;
 ```
