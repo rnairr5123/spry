@@ -168,66 +168,39 @@ WHERE regime_raw_value = $regime_raw_value
      
       
  
-SELECT
-  'card' AS component,
-  '' AS title,
-  1 AS columns;
+-- Use SQLPage's built-in foldable component for collapsible Markdown content
+SELECT 'foldable' AS component;
 
-  -- Accordion OPEN
-
--- Accordion OPEN
-SELECT 'html' AS component, html
-FROM ai_ctxe_ui_policy_audit_accordion_open_author 
-
-UNION ALL 
-
-SELECT 'html' AS component, 
-       '<div class="accordion-content">' || body_text || '</div>' AS html
+-- Author Prompt Section
+SELECT 
+    'Author Prompt' AS title,
+    body_text AS description_md
 FROM ai_ctxe_author_prompt 
 WHERE frontmatter_control_id = $regime_raw_value 
   AND fiiId = $fii_id 
   AND regimeType = $regime 
 
-UNION ALL 
+UNION ALL
 
-SELECT 'html' AS component, html
-FROM ai_ctxe_ui_policy_audit_accordion_close;
--- audit ptompt
-
-SELECT 'html' AS component, html
-FROM ai_ctxe_ui_policy_audit_accordion_open_audit
-
-UNION ALL 
-
-SELECT 'html' AS component, 
-       '<div class="accordion-content">' || body_text || '</div>' AS html
+-- Audit Prompt Section  
+SELECT 
+    'Audit Prompt' AS title,
+    body_text AS description_md
 FROM ai_ctxe_audit_prompt 
 WHERE frontmatter_control_id = $regime_raw_value 
   AND fiiId = $fii_id 
   AND regimeType = $regime 
 
-UNION ALL 
+UNION ALL
 
-SELECT 'html' AS component, html
-FROM ai_ctxe_ui_policy_audit_accordion_close;
-
---policy
-SELECT 'html' AS component, html
-FROM ai_ctxe_ui_policy_audit_accordion_open_policy
-
-UNION ALL 
-
-SELECT 'html' AS component, 
-       '<div class="accordion-content">' || body_text || '</div>' AS html
+-- Policy Section
+SELECT 
+    'Policy' AS title,
+    body_text AS description_md
 FROM ai_ctxe_policy 
 WHERE control_id = $regime_raw_value 
   AND fii_id = $fii_id 
-  AND regimeType = $regime 
-
-UNION ALL 
-
-SELECT 'html' AS component, html
-FROM ai_ctxe_ui_policy_audit_accordion_close;
+  AND regimeType = $regime;
 
 
 
