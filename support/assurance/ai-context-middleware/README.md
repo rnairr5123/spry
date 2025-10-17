@@ -128,10 +128,7 @@ SELECT 'table' AS component,
        'SCF #' AS markdown,
        TRUE AS search; 
 SELECT '[' || regime_raw_value || '](' ||
-       'scf-prompt-details.sql?' ||
-       'regime_raw_value=' || REPLACE(REPLACE(regime_raw_value, ' ', ''), '/', '') ||
-       '&regime=' || REPLACE(REPLACE(regime_label, ' ', ''), '/', '') ||
-       '&fii_id=' || fii_id ||
+       ${ctx.absUrlUnquoted("'' || 'scf-prompt-details.sql?regime_raw_value=' || replace(replace(replace(replace(replace(replace(replace(replace(regime_raw_value, '/', '%2F'), '.', '%2E'), ')', '%29'), '(', '%28'), '#', '%23'), '&', '%26'), ' ', '%20'), char(10), '') || '&regime=' || replace(replace(replace(replace(regime_label, '/', '%2F'), '#', '%23'), '&', '%26'), ' ', '%20') || '&fii_id=' || fii_id || ''")} ||
        ')' AS "SCF #",
        scf_control AS  "Regime Marker",
        scf_control_question AS "SCF Control Question"
@@ -166,7 +163,7 @@ ${paginate("scf_regime_control", "WHERE scf_no = $scf_no")}
        '\n **Control Question** : ' ||a.scf_control_question AS description_md
 
       FROM aictxe_regime_control_standardized a
-      where regime_raw_value=$regime_raw_value and fii_id=$fiid_id and regime=$regime;
+      where regime_raw_value=$regime_raw_value and fii_id=$fii_id and regime=$regime;
      
       
  
@@ -176,5 +173,5 @@ SELECT
   1 AS columns;
 SELECT  
 body_text AS description_md
-      FROM ai_ctxe_view_uniform_resource_compliance  where frontmatter_control_id=$regime_raw_value ;
+      FROM ai_ctxe_view_uniform_resource_compliance  where frontmatter_control_id=$regime_raw_value AND fiiId=$fii_id AND regimeType = $regime;
 ```
