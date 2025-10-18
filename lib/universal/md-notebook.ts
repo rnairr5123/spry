@@ -513,6 +513,139 @@ function parseDocument<
   } satisfies Notebook<Provenance, FM, Attrs, I>;
 }
 
+/**
+ * Parse posix CLI-style args into a flexible record, collecting repeated flags.
+ *
+ * Supports:
+ * - Long flags: `--key value` or `--key=value`
+ * - Long flags: `--key` (on/off)
+ * - Short flags: `-k value` or `-k=value or -k`
+ *
+ * Behavior:
+ * - Flags not present in `base` are automatically added.
+ * - First occurrence of a flag overwrites any base default.
+ * - Subsequent occurrences of the same flag promote to / append a string[].
+ *
+ * @template T - Optional initial record type (string or string[] values).
+ * @param argv - CLI arguments (e.g., `Deno.args`).
+ * @param base - Optional initial record for defaults or typing.
+ * @returns A record with parsed flags and collected values.
+ */
+export function parsedTextFlags<
+  T extends Record<string, string | string[] | boolean> = Record<
+    string,
+    string | string[] | boolean
+  >,
+>(
+  argv: readonly string[],
+  base?: T,
+): T {
+  const out: Record<string, string | string[] | boolean> = base
+    ? { ...base }
+    : {};
+  const seenFromArg = new Set<string>();
+
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (!token.startsWith("-")) continue;
+
+    const isLong = token.startsWith("--");
+    const prefixLen = isLong ? 2 : 1;
+
+    const eqIdx = token.indexOf("=");
+    const key = eqIdx === -1
+      ? token.slice(prefixLen)
+      : token.slice(prefixLen, eqIdx);
+    if (!key) continue;
+
+    // value cases:
+    // 1) --k=v or -k=v  => string value after '='
+    // 2) --k v or -k v  => next token if not another flag
+    // 3) bare (--k or -k) => boolean true
+    let val: string | boolean | undefined;
+    if (eqIdx !== -1) {
+      val = token.slice(eqIdx + 1);
+    } else if (i + 1 < argv.length && !argv[i + 1].startsWith("-")) {
+      val = argv[++i];
+    } else {
+      val = true;
+    }
+
+    const current = out[key];
+
+    if (Array.isArray(current)) {
+      // already a string array: append stringified value
+      out[key] = [...current, String(val)];
+    } else if (seenFromArg.has(key)) {
+      // promote to array
+      if (typeof current === "string") {
+        out[key] = [current, String(val)];
+      } else if (current === true) {
+        out[key] = ["true", String(val)];
+      } else {
+        // base might have been undefined or non-string; start fresh
+        out[key] = [String(val)];
+      }
+    } else {
+      // first time set from argv
+      out[key] = val;
+    }
+
+    seenFromArg.add(key);
+  }
+
+  return out as T;
+}
+
+/**
+ * Parse a space-delimited text string into its leading token, argument list,
+ * and argsText, returning a structured object for easy access.
+ *
+ * Useful for decomposing shell-like or CLI-style command strings into their
+ * components, preserving the original argument order.
+ *
+ * @example
+ * ```ts
+ * parsedTextComponents("bash name --dep=X --dep Y");
+ * // {
+ * //   first: "bash",
+ * //   argv: ["name", "--dep", "X", "--dep", "Y"],
+ * //   argsText: "name --dep X --dep Y",
+ * //   flags: [Function: flags]
+ * // }
+ *
+ * // Optionally, if parsedTextFlags() supports collecting repeated flags:
+ * const parsed = parsedTextComponents("bash name --dep X --dep=Y");
+ * parsed.flags();
+ * // => {
+ * //   name: "name",
+ * //   dep: ["X", "Y"]
+ * // }
+ * ```
+ *
+ * @param candidate - A text string to parse (e.g., command line input).
+ * @returns
+ * - `false` if the input is empty, undefined, or only whitespace.
+ * - Otherwise an object containing:
+ *   - `first`: the first token (typically a command).
+ *   - `argv`: an array of the remaining tokens.
+ *   - `argsText`: the remaining text after the first token.
+ *   - `flags()`: a lazily-evaluated parser for CLI-style flags.
+ */
+export function parsedTextComponents(candidate?: string) {
+  if (!candidate) return false;
+  const info = candidate?.trim();
+  if (info.length == 0) return false;
+  const [first, ...argv] = info.split(/\s+/);
+  const argsText = argv.join(" ").trim();
+  return {
+    first,
+    argv,
+    argsText,
+    flags: () => parsedTextFlags(argv),
+  };
+}
+
 /* =========================== Tiny Runtime & Type Guards ============== */
 
 /** mdast position helper shapes (kept local, no `any`) */
