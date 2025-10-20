@@ -4,7 +4,7 @@ Spry lets you maintain a whole SQLPage site from one or more Markdown playbooks:
 
 - You write prose + fenced blocks.
 - Special **INFO directives** in the fence header tell Spry what each block is
-  (HEAD, TAIL, PARTIAL, LAYOUT, or a concrete SQL file path).
+  (HEAD, TAIL, PARTIAL, injectable PARTIAL, or a concrete SQL file path).
 - Optional JSON5 fence attributes annotate things like routes.
 - Spry turns your playbook into real `.sql` files (or SQL DML to upsert into
   SQLPage’s virtual file table), plus helpful auto-generated artifacts.
@@ -13,22 +13,24 @@ Under the hood this is driven by:
 
 - `lib/sqlpage/playbook.ts` — parses playbooks and emits file entries (and DML).
 - `lib/sqlpage/directives.ts` — parses fence `info` into directives: `HEAD`,
-  `TAIL`, `PARTIAL`, `LAYOUT`, or default `sqlpage_file`.
+  `TAIL`, `PARTIAL`, or default `sqlpage_file`.
 - `lib/sqlpage/route.ts` — validates and renders navigation routes from
   per-block `route` attrs.
 - `spry.ts` — the CLI front-end.
 
 ## CLI (`spry.ts`)
 
+`spc` stands for SQLPage Content.
+
 ```bash
 # Windows or Linux/macOS
-deno run -A spry.ts -m app.md [--fs out/] [-p] [-c sqlpage.json]
-deno run -A spry.ts -m app.md -p | sqlite3 app.db
-deno run -A spry.ts -m https://github.com/shah/my-repo/main/app.md ls
+deno run -A spry.ts spc -m app.md [--fs out/] [-p] [-c sqlpage.json]
+deno run -A spry.ts spc -m app.md -p | sqlite3 app.db
+deno run -A spry.ts spc -m https://github.com/shah/my-repo/main/app.md ls
 
 # Linux/macOS
-./spry.ts -m app.md [--fs out/] [-p] [-c sqlpage.json]
-./spry.ts -m app.md -p | sqlite3 app.db
+./spry.ts spc -m app.md [--fs out/] [-p] [-c sqlpage.json]
+./spry.ts spc -m app.md -p | sqlite3 app.db
 ```
 
 Global option (repeatable):
@@ -55,8 +57,8 @@ Main behaviors:
 or preparing any output.
 
 ```bash
-./spry.ts ls -m app.md
-./spry.ts ls -m app.md --tree
+./spry.ts spc ls -m app.md
+./spry.ts spc ls -m app.md --tree
 ```
 
 You’ll see a table (or a tree with `--tree`) showing:
@@ -69,14 +71,15 @@ You’ll see a table (or a tree with `--tree`) showing:
   - `R` this entry supplies a **route** (from attrs)
   - `A` auto-generated artifact (e.g., route tree dump)
   - `E` error captured (contents are an error payload)
-  - `L` a **layout** was applied
+  - `P` a **partial** was applied
 
 ### `cat` Subcommand
 
-`cat` prints contents of the derived files matching a glob
+`cat` prints contents of the derived files matching a glob. Be sure to quote
+your globs so the OS shell doesn't intercept and expand the globs.
 
 ```bash
-./spry.ts -m app.md cat -g "admin/*.sql" -g "sql.d/head/*.sql"
+./spry.ts spc cat -m app.md -g "admin/*.sql" -g "sql.d/head/*.sql"
 ```
 
 ## Authoring: fence “INFO directives” and attributes
@@ -122,27 +125,27 @@ SELECT 'Docs', '/docs';
 
 Not written as a standalone file. Referenced during interpolation.
 
-### LAYOUT
+### Auto-injected PARTIAL
 
 Define a wrapper to apply around matched files (by glob). Useful for
 headers/footers:
 
-```sql LAYOUT **/*.sql
+```sql PARTIAL global-layout --inject **/*
 --layout:start
 /* header for ${path} */
 --layout:body
 /* footer */
 ```
 
-When a generated file is layout-candidate, the body is inserted at
+When a generated file is injectable-candidate, the body is inserted at
 `--layout:body` (here we just concatenate, i.e., `layout + contents`). The
-matcher uses glob semantics; the **most specific** layout wins (`directives.ts`
+matcher uses glob semantics; the **most specific** partial wins (`cell.ts`
 caches and ranks by wildcard count and length).
 
 ### Regular SQL files (default: `sqlpage_file`)
 
-If `info` is not `HEAD|TAIL|PARTIAL|LAYOUT`, Spry treats the **first token** as
-a **relative path** to write:
+If `info` is not `HEAD|TAIL|PARTIAL`, Spry treats the **first token** as a
+**relative path** to write:
 
 ```sql admin/index.sql { route: { caption: 'Admin', description: 'Admin landing' } }
 -- this block becomes admin/index.sql
@@ -171,7 +174,7 @@ support simple composition. It provides a context with:
 Example:
 
 ```sql admin/index.sql { site: '/admin' }
--- Apply a layout and a partial; both support interpolation
+-- Apply a layout (auto-injected partial) and a partial; both support interpolation
 -- `${partial('navbar')}` injects the code from the PARTIAL above
 
 SELECT ${sitePrefixed(`'${path}'`)} AS base_path;
@@ -217,7 +220,7 @@ You’ll typically see:
 - `admin/index.sql`, `docs/*.sql`, … — from regular SQL fences (`info` as path).
 - `spry.d/auto/resource/<path>.auto.json` — JSON dump of each fence’s **attrs**
   (handy for debugging and automations).
-- `spry.d/auto/layout/*.auto.sql` — layout definitions (echoed back so you can
+- `spry.d/auto/partial/*.auto.sql` — partial definitions (echoed back so you can
   inspect which matched).
 - `spry.d/issues/<provenance>.auto.json` — parse issues (e.g., malformed JSON5
   attrs), if any.
@@ -264,7 +267,7 @@ starter example.
 - Use **JSON5** in attrs (trailing commas are NOT allowed if they break JSON5
   rules — errors will surface in `spry.d/issues/*.auto.json`).
 - Keep **partials** small (they’re just text substitution).
-- Layout selection prefers **more specific globs** (fewer wildcards, longer
-  patterns).
+- Injected partials' selection prefers **more specific globs** (fewer wildcards,
+  longer patterns).
 - Interpolation is powerful—use it intentionally; it will mark files with `I` in
   `ls`.
