@@ -1,6 +1,5 @@
 import { basename, dirname, join } from "jsr:@std/path@^1";
 import { z } from "jsr:@zod/zod@4";
-import { PlaybookCodeCellMutator } from "../universal/md-playbook.ts";
 import {
   forestToEdges,
   pathTree,
@@ -95,35 +94,6 @@ export function pathExtensions(path: string) {
   };
 }
 
-export const enrichRoute: PlaybookCodeCellMutator<string> = (
-  cell,
-  { pb, registerIssue },
-) => {
-  if (!isRouteSupplier(cell.attrs)) return;
-  const route = cell.attrs.route as PageRoute;
-  if (!route.path && cell.info) {
-    route.path = cell.info;
-  }
-  const extensions = pathExtensions(route.path);
-  route.pathBasename = extensions.basename;
-  route.pathBasenameNoExtn = extensions.basename.split(".")[0];
-  route.pathDirname = dirname(route.path);
-  route.pathExtnTerminal = extensions.terminal;
-  route.pathExtns = extensions.extensions;
-  const parsed = z.safeParse(pageRouteSchema, route);
-  if (!parsed.success) {
-    registerIssue({
-      kind: "fence-issue",
-      disposition: "error",
-      error: parsed.error,
-      message: `Zod error parsing route: ${z.prettifyError(parsed.error)}`,
-      provenance: pb.notebook.provenance,
-      startLine: cell.startLine,
-      endLine: cell.endLine,
-    });
-  }
-};
-
 export async function resolvedRoutes(candidates: Iterable<PageRoute>) {
   const forest = await pathTree<PageRoute, string>(
     candidates,
@@ -159,4 +129,22 @@ export async function resolvedRoutes(candidates: Iterable<PageRoute>) {
     edges,
     nav,
   };
+}
+
+export class RoutesBuilder {
+  #resolved?: Awaited<ReturnType<typeof resolvedRoutes>>;
+
+  constructor(readonly encountered: PageRoute[] = []) {
+  }
+
+  encounter(pr: PageRoute) {
+    this.encountered.push(pr);
+  }
+
+  async resolved() {
+    if (!this.#resolved) {
+      this.#resolved = await resolvedRoutes(this.encountered);
+    }
+    return this.#resolved;
+  }
 }

@@ -18,6 +18,10 @@ sqlpage-conf:
 
 ## Intro
 
+```bash init
+test
+```
+
 ```sql HEAD
 -- head at start
 PRAGMA foreign_keys = ON;
@@ -33,17 +37,23 @@ select 1;
 select 2;
 -- this is the path: ${path}
 -- this is the cell: ${cell?.kind}
--- this is the frontmatter in the cell's notebook: ${JSON.stringify(cell.frontmatter)}
+-- this is the frontmatter in the cell's notebook: ${safeJsonStringify(cell.frontmatter)}
 ```
 
+The following cell demonstrates how to partials can use type-safe arguments for
+replacement.
+
 ```sql PARTIAL test-partial { newLocal: { type: "string", required: true } }
+-- this is the ${cell.info} cell on line ${cell.startLine}
 -- this is the path in test-partial: ${path}
 -- this is the cell in test-partial: ${cell?.kind}
 -- this is the newLocal in test-partial: ${newLocal}
 ```
 
 ```sql debug.sql
--- site prefixed: ${ctx.sitePrefixed("'test'")}
+-- markdown link (mdLink): ${md.link("simpleText", "simpleURL")}
+-- sqlCat: ${sqlCat`prefix-${"col"}-mid-${"other"}-suffix`}
+-- site prefixed: ${ctx.sitePrefixed("test")}
 
 -- partial 1 (error): ${await partial("non-existent")}
 
@@ -53,7 +63,7 @@ select 2;
 
 -- partial 4 (without await): ${partial("test-partial", { newLocal: "passed from debug.sql without await"})}
 
--- full context: ${JSON.stringify(ctx)}
+-- full context: add `$` to see... {safeJsonStringify(ctx)}
 ```
 
 ```sql pagination.sql { route: { caption: "Unpivoted" } }
@@ -76,23 +86,25 @@ ${pagination.limit}; -- needed as part of SELECT for pagination
 ${pagination.navigation}
 ```
 
-The following `LAYOUT` will be prefixed across every SQLPage page because no
-paths are provided (`sql LAYOUT` without path is same as `sql LAYOUT **/*`).
+The following `PARTIAL` acts as a _layout_ and will be prefixed across every
+SQLPage page because `--inject **/*` is supplied. `--prepend` is the default
+injection.
 
 The `${path}` will be replaced with the path of the page. `${ctx.*}` are all
 state variables like `${ctx.directives}`, `${ctx.routes}`, etc. but the local
 page variables are like `${page}`, `${route}`, `${cell}`, etc.
 
-```sql LAYOUT
--- global LAYOUT (defaults to **/*)
+```sql PARTIAL global-layout --inject **/*
+-- global LAYOUT (partial)
 SET resource_json = sqlpage.read_file_as_text('spry.d/auto/resource/${path}.auto.json');
 -- add shell, etc. here
+-- this is the `${cell.info}` cell on line ${cell.startLine}
 ```
 
-The following `LAYOUT` will be prefixed only for the admin paths:
+The following `PARTIAL` will be prepended (injected) only for the admin paths:
 
-```sql LAYOUT admin/**
--- admin/** LAYOUT
+```sql PARTIAL admin-layout --inject admin/**
+-- admin/** LAYOUT (partial)
 SET resource_json = sqlpage.read_file_as_text('spry.d/auto/resource/${path}.auto.json');
 -- add shell, etc. here
 ```
