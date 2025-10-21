@@ -371,7 +371,7 @@ export class CLI {
             // If --conf is present, write sqlpage.json
             if (opts.conf) {
               let emitted = 0, encountered = 0;
-              const pp = await this.spn.prepare({
+              const pp = await this.spn.populateContent({
                 mdSources: opts.md.map((f) => String(f)),
                 srcRelTo: opts.srcRelTo,
                 state: sqlPagePlaybookState(),
@@ -438,26 +438,38 @@ export class CLI {
           .option(...mdOpt)
           .option(...srcRelToOpt)
           .option("--verbose", "Emit information messages")
-          .option("--dry-run", "Don't execute, do a dry-run only")
           .action(async (opts, taskId) => {
-            const pp = await this.spn.prepare({
+            const pp = await this.spn.populateContent({
               mdSources: opts.md.map((f) => String(f)),
               srcRelTo: opts.srcRelTo,
               state: sqlPagePlaybookState(),
             });
-            taskCLI.executeTasks(executionSubplan(pp.executionPlan, [taskId]));
+            taskCLI.executeTasks(
+              executionSubplan(pp.executionPlan, [taskId]),
+              opts.verbose ? "rich" : false,
+            );
           })
           .command("ls", "List SQLPage file entries")
           .type("sourceRelTo", srcRelTo)
           .option(...mdOpt)
           .option(...srcRelToOpt)
+          .option(
+            "-c, --content",
+            "List CONTENT cells in addition to executables",
+          )
           .action(async (opts) => {
-            const pp = await this.spn.prepare({
+            const pp = await this.spn.populateContent({
               mdSources: opts.md.map((f) => String(f)),
               srcRelTo: opts.srcRelTo,
               state: sqlPagePlaybookState(),
             });
-            taskCLI.ls(pp.state.directives.tasks);
+            taskCLI.ls(
+              opts.content
+                ? pp.state.directives.tasks
+                : pp.state.directives.tasks.filter((t) =>
+                  t.taskDirective.nature === "TASK"
+                ),
+            );
           }),
       );
   }
