@@ -13,22 +13,29 @@ DROP VIEW IF EXISTS aictxe_regime_control_standardized;
 -- Example: CFG-01.2 -> FII-SCF-CFG-0001.2
 -- ============================================================================
 CREATE VIEW aictxe_regime_control_standardized AS
-SELECT 
-    *,
-    'FII-SCF-' || 
-    SUBSTR(scf_no, 1, 3) || 
+SELECT
+    regime,
+    scf_no,
+    scf_domain,
+    scf_control,
+    scf_control_question,
+    regime_label,
+    REPLACE(REPLACE(REPLACE(regime_raw_value, CHAR(10), ' '), CHAR(13), ' '), '  ', ' ') AS regime_raw_value,
+    regime_column_ordinal,
+    'FII-SCF-' ||
+    SUBSTR(scf_no, 1, 3) ||
     '-' ||
-    PRINTF('%04d', 
+    PRINTF('%04d',
         CAST(
-            CASE 
-                WHEN INSTR(SUBSTR(scf_no, 5), '.') > 0 
+            CASE
+                WHEN INSTR(SUBSTR(scf_no, 5), '.') > 0
                 THEN SUBSTR(SUBSTR(scf_no, 5), 1, INSTR(SUBSTR(scf_no, 5), '.') - 1)
                 ELSE SUBSTR(scf_no, 5)
             END AS INTEGER
         )
     ) ||
-    CASE 
-        WHEN INSTR(SUBSTR(scf_no, 5), '.') > 0 
+    CASE
+        WHEN INSTR(SUBSTR(scf_no, 5), '.') > 0
         THEN '.' || SUBSTR(SUBSTR(scf_no, 5), INSTR(SUBSTR(scf_no, 5), '.') + 1)
         ELSE ''
     END AS fii_id
@@ -44,34 +51,14 @@ FROM scf_regime_control_unpivoted;
 -- ============================================================================
 
 -- Drop existing views if they exist
-DROP VIEW IF EXISTS aictxe_regime_control_standardized;
+
 
 -- ============================================================================
 -- View 1: Standardized SCF Control Numbers
 -- Transforms SCF control numbers to FII standard format
 -- Example: CFG-01.2 -> FII-SCF-CFG-0001.2
 -- ============================================================================
-CREATE VIEW aictxe_regime_control_standardized AS
-SELECT 
-    *,
-    'FII-SCF-' || 
-    SUBSTR(scf_no, 1, 3) || 
-    '-' ||
-    PRINTF('%04d', 
-        CAST(
-            CASE 
-                WHEN INSTR(SUBSTR(scf_no, 5), '.') > 0 
-                THEN SUBSTR(SUBSTR(scf_no, 5), 1, INSTR(SUBSTR(scf_no, 5), '.') - 1)
-                ELSE SUBSTR(scf_no, 5)
-            END AS INTEGER
-        )
-    ) ||
-    CASE 
-        WHEN INSTR(SUBSTR(scf_no, 5), '.') > 0 
-        THEN '.' || SUBSTR(SUBSTR(scf_no, 5), INSTR(SUBSTR(scf_no, 5), '.') + 1)
-        ELSE ''
-    END AS fii_id
-FROM scf_regime_control_unpivoted;
+
 
 
 -- Create a foundation view with common patterns - MUST BE FIRST
@@ -721,3 +708,17 @@ JOIN
 WHERE
   fs.file_basename LIKE '%.policy.md';
 
+
+-- ============================================================================
+-- label view
+-- ============================================================================
+DROP VIEW IF EXISTS ai_ctxe_ui_labels_control_description;
+
+CREATE VIEW ai_ctxe_ui_labels_control_description AS
+SELECT
+  '**SCF Domain:** ' AS label_scf_domain,
+  '**SCF Control:** ' AS label_scf_control,
+  '**Control Question:** ' AS label_control_question,
+  '**FII ID:** ' AS label_fii_id,
+  '  
+' AS newline;
