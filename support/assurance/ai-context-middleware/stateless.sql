@@ -100,7 +100,7 @@ SELECT
     
     -- File metadata
     urf.nature AS file_nature,
-    urf.source_path,
+    urf.root_path,
     urf.file_path_rel,
     urf.size_bytes
 
@@ -138,7 +138,7 @@ SELECT
     base.ord,
     base.body_text,
     base.file_nature AS nature,
-    base.source_path,
+    base.root_path,
     base.file_path_rel,
     base.size_bytes
 FROM ai_ctxe_uniform_resource_base base
@@ -213,7 +213,7 @@ SELECT DISTINCT
     base.summary,
     base.body_text,
     base.file_nature AS nature,
-    base.source_path,
+    base.root_path,
     base.file_path_rel,
     base.size_bytes
 FROM ai_ctxe_uniform_resource_base base
@@ -235,7 +235,7 @@ SELECT DISTINCT
     base.summary,
     base.body_text,
     base.file_nature AS nature,
-    base.source_path,
+    base.root_path,
     base.file_path_rel,
     base.size_bytes
 FROM ai_ctxe_uniform_resource_base base
@@ -441,7 +441,7 @@ SELECT DISTINCT
     base.summary,
     base.body_text,
     base.file_nature AS nature,
-    base.source_path,
+    base.root_path,
     base.file_path_rel,
     base.size_bytes
 FROM ai_ctxe_uniform_resource_base base
@@ -568,7 +568,7 @@ SELECT DISTINCT
     base.ord,
     base.body_text,
     base.file_nature AS nature,
-    base.source_path,
+    base.root_path,
     base.file_path_rel,
     base.size_bytes,
     
