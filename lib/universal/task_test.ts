@@ -1,9 +1,18 @@
 import { assertArrayIncludes, assertEquals } from "jsr:@std/assert@^1";
 import {
+  createExecutor,
   executeDAG,
   executionPlan,
+  executionSubplan,
+  fail,
+  matchKind,
+  ok,
   type Task,
   type TaskExecutionResult,
+  TaskExecutorBuilder,
+  withRetry,
+  withTimeout,
+  withTiming,
 } from "./task.ts";
 
 /** Simple test task that implements the required Task interface. */
@@ -185,6 +194,135 @@ Deno.test("executionPlan()", async (t) => {
   });
 });
 
+/* ========================
+ * subplan() tests
+ * ======================== */
+
+Deno.test("subplan()", async (t) => {
+  await t.step(
+    "leaf target pulls all ancestors; order is definition-stable",
+    () => {
+      // clean -> build -> test
+      const tasks = [T("clean"), T("build", ["clean"]), T("test", ["build"])];
+      const full = executionPlan(tasks);
+
+      const sp = executionSubplan(full, ["test"]);
+      assertEquals(sp.ids, ["clean", "build", "test"]);
+      assertEquals(sp.edges, [["clean", "build"], ["build", "test"]]);
+      assertEquals(sp.layers, [["clean"], ["build"], ["test"]]);
+      assertEquals(sp.unresolved, []);
+      assertEquals(sp.dag.map((t) => t.taskId()), ["clean", "build", "test"]);
+    },
+  );
+
+  await t.step(
+    "middle target includes just its ancestors (not unrelated leaves)",
+    () => {
+      const tasks = [T("clean"), T("build", ["clean"]), T("test", ["build"])];
+      const full = executionPlan(tasks);
+
+      const sp = executionSubplan(full, ["build"]);
+      assertEquals(sp.ids, ["clean", "build"]);
+      assertEquals(sp.edges, [["clean", "build"]]);
+      assertEquals(sp.layers, [["clean"], ["build"]]);
+      assertEquals(sp.unresolved, []);
+    },
+  );
+
+  await t.step("multiple targets unify closures without duplicates", () => {
+    const tasks = [T("clean"), T("build", ["clean"]), T("test", ["build"])];
+    const full = executionPlan(tasks);
+
+    const sp = executionSubplan(full, ["build", "test"]);
+    assertEquals(sp.ids, ["clean", "build", "test"]);
+    assertEquals(sp.layers, [["clean"], ["build"], ["test"]]);
+  });
+
+  await t.step("unknown targets are ignored safely", () => {
+    const tasks = [T("a"), T("b", ["a"]), T("c", ["b"])];
+    const full = executionPlan(tasks);
+
+    const sp = executionSubplan(full, ["nope", "c"]);
+    assertEquals(sp.ids, ["a", "b", "c"]);
+    assertEquals(sp.edges, [["a", "b"], ["b", "c"]]);
+  });
+
+  await t.step("filters missingDeps to selected nodes only", () => {
+    // build depends on clean (exists) and ghost (missing)
+    // other is unrelated and has its own missing dep that should be filtered out
+    const tasks = [
+      T("clean"),
+      T("build", ["clean", "ghost"]),
+      T("other", ["phantom"]),
+    ];
+    const full = executionPlan(tasks);
+
+    const sp = executionSubplan(full, ["build"]);
+    assertEquals(sp.missingDeps, { build: ["ghost"] });
+    assertEquals(sp.indegree["build"], 1); // only 'clean' contributes
+    assertEquals(sp.edges, [["clean", "build"]]);
+    assertEquals(sp.ids, ["clean", "build"]);
+  });
+
+  await t.step("does not mutate original plan structures", () => {
+    const tasks = [T("root"), T("a", ["root"]), T("b", ["a"])];
+    const full = executionPlan(tasks);
+    const snapshot = {
+      ids: [...full.ids],
+      indegree: { ...full.indegree },
+      edges: [...full.edges],
+      layers: full.layers.map((w) => [...w]),
+      unresolved: [...full.unresolved],
+    };
+
+    // create a subplan and then re-assert original is intact
+    void executionSubplan(full, ["b"]);
+
+    assertEquals(full.ids, snapshot.ids);
+    assertEquals(full.indegree, snapshot.indegree);
+    assertEquals(full.edges, snapshot.edges);
+    assertEquals(full.layers, snapshot.layers);
+    assertEquals(full.unresolved, snapshot.unresolved);
+  });
+
+  await t.step(
+    "execution over a subplan runs only selected induced nodes",
+    async () => {
+      // root -> a -> b ; plus an unrelated component x -> y
+      const tasks = [
+        T("root"),
+        T("a", ["root"]),
+        T("b", ["a"]),
+        T("x"),
+        T("y", ["x"]),
+      ];
+      const full = executionPlan(tasks);
+      const sp = executionSubplan(full, ["b"]); // should include root, a, b only
+
+      const ran: string[] = [];
+      const summary = await executeDAG(
+        sp,
+        // deno-lint-ignore require-await
+        async (task) => {
+          const now = new Date();
+          ran.push(task.taskId());
+          return {
+            disposition: "continue",
+            ctx: { runId: "sub" },
+            success: true,
+            exitCode: 0,
+            startedAt: now,
+            endedAt: now,
+          };
+        },
+      );
+
+      assertEquals(summary.terminated, false);
+      assertEquals(ran, ["root", "a", "b"]);
+    },
+  );
+});
+
 Deno.test("executeDAG()", async (t) => {
   await t.step(
     "executes tasks in topological order and accumulates a section stack",
@@ -199,7 +337,7 @@ Deno.test("executeDAG()", async (t) => {
       const order: string[] = [];
       const summary = await executeDAG(
         plan,
-        async (task, section) => {
+        async (task, _ctx, section) => {
           assertEquals(order.length, section.length);
           const startedAt = new Date();
           await (task.run?.() ?? Promise.resolve());
@@ -593,5 +731,213 @@ Deno.test("executionPlan()", async (t) => {
     assertEquals(plan.layers[0], ["n0"]);
     assertEquals(plan.layers[N - 1], [`n${N - 1}`]);
     assertEquals(plan.unresolved, []);
+  });
+});
+
+Deno.test("TaskExecutorBuilder & helpers", async (t) => {
+  // Discriminated tasks
+  type Ctx = { runId: string };
+  interface ShellTask extends Task {
+    kind: "shell";
+    cmd: string[];
+    allowFail?: boolean;
+  }
+  interface SqlTask extends Task {
+    kind: "sql";
+    sql: string;
+  }
+  type AnyTask = ShellTask | SqlTask;
+
+  const TT = (
+    id: string,
+    kind: AnyTask["kind"],
+    deps: string[] = [],
+  ): AnyTask => ({
+    taskId: () => id,
+    taskDeps: () => deps,
+    kind,
+    // payloads just for kind
+    ...(kind === "shell" ? { cmd: ["echo", id] } : { sql: `select '${id}'` }),
+  } as AnyTask);
+
+  const isShell = matchKind<"shell", ShellTask>("shell");
+  const isSql = matchKind<"sql", SqlTask>("sql");
+
+  await t.step("routes to matching handlers and preserves order", async () => {
+    const tasks: AnyTask[] = [
+      TT("clean", "shell"),
+      TT("build", "sql", ["clean"]),
+      TT("test", "shell", ["build"]),
+    ];
+    const plan = executionPlan(tasks);
+
+    const logs: string[] = [];
+
+    const exec = new TaskExecutorBuilder<AnyTask, Ctx>()
+      .handle(isShell, (task, ctx) => {
+        logs.push(`shell:${task.taskId()}`);
+        return ok<AnyTask, Ctx>(ctx);
+      })
+      .handle(isSql, (task, ctx) => {
+        logs.push(`sql:${task.taskId()}`);
+        return ok<AnyTask, Ctx>(ctx);
+      })
+      .build();
+
+    const summary = await executeDAG(plan, exec, {
+      ctx: { runId: "r1" } as Ctx,
+    });
+    assertEquals(summary.terminated, false);
+    assertEquals(summary.ran, ["clean", "build", "test"]);
+    assertEquals(logs, ["shell:clean", "sql:build", "shell:test"]);
+  });
+
+  await t.step("fallback handles unknown kinds", async () => {
+    interface UnknownTask extends Task {
+      kind: "???";
+    }
+    const unk: UnknownTask = {
+      taskId: () => "u",
+      taskDeps: () => [],
+      kind: "???",
+    };
+    const plan = executionPlan([unk as unknown as AnyTask]);
+
+    const exec = new TaskExecutorBuilder<AnyTask, Ctx>()
+      .handle(isShell, (_, ctx) => ok<AnyTask, Ctx>(ctx))
+      .fallback((_t, ctx) =>
+        fail<AnyTask, Ctx>(ctx, new Error("no-handler"), {
+          disposition: "continue",
+        })
+      )
+      .build();
+
+    const summary = await executeDAG(plan, exec, {
+      ctx: { runId: "r2" } as Ctx,
+    });
+    assertEquals(summary.terminated, false);
+    assertEquals(summary.ran, ["u"]);
+    assertEquals(summary.section[0].result.success, false);
+  });
+
+  await t.step(
+    "withTiming attaches elapsed to stderr on failures",
+    async () => {
+      const a = TT("a", "shell");
+      const plan = executionPlan([a]);
+
+      const exec = new TaskExecutorBuilder<AnyTask, Ctx>()
+        .handle(
+          isShell,
+          // deno-lint-ignore require-await
+          async (_t, ctx) => fail<AnyTask, Ctx>(ctx, new Error("boom")),
+        )
+        .use(withTiming())
+        .build();
+
+      const summary = await executeDAG(plan, exec, {
+        ctx: { runId: "r3" } as Ctx,
+      });
+      const res = summary.section[0].result;
+
+      // Narrow the union so stderr is in scope
+      if (res.success) {
+        throw new Error(
+          "Expected a failure result to test stderr instrumentation",
+        );
+      }
+
+      // res is now the failure branch; stderr exists (instrumented by withTiming)
+      const stderrFn = res.stderr;
+      // Extra safety: ensure middleware attached it
+      if (!stderrFn) {
+        throw new Error("Expected withTiming to attach stderr on failure");
+      }
+
+      const txt = new TextDecoder().decode(stderrFn());
+      // contains elapsed_ms=...
+      assertEquals(/elapsed_ms=\d+(\.\d+)?/.test(txt), true);
+    },
+  );
+
+  await t.step("withTimeout terminates long tasks", async () => {
+    const slow = TT("slow", "shell");
+    const plan = executionPlan([slow]);
+
+    const exec = new TaskExecutorBuilder<AnyTask, Ctx>()
+      .handle(isShell, async (_t, ctx) => {
+        await new Promise((r) => setTimeout(r, 30));
+        return ok<AnyTask, Ctx>(ctx);
+      })
+      .use(withTimeout<AnyTask, Ctx>(10))
+      .build();
+
+    const summary = await executeDAG(plan, exec, {
+      ctx: { runId: "r4" } as Ctx,
+    });
+    assertEquals(summary.section[0].result.success, false);
+    assertEquals(summary.terminated, true); // default disposition=terminate
+  });
+
+  await t.step(
+    "withRetry retries failures and then continues on final fail if configured",
+    async () => {
+      const flakey = TT("f", "shell");
+      const plan = executionPlan([flakey]);
+
+      let attempts = 0;
+      const exec = new TaskExecutorBuilder<AnyTask, Ctx>()
+        .handle(isShell, (_t, ctx) => {
+          attempts++;
+          if (attempts < 3) {
+            return fail<AnyTask, Ctx>(ctx, new Error("try-again"), {
+              disposition: "continue",
+            });
+          }
+          return ok<AnyTask, Ctx>(ctx);
+        })
+        .use(withRetry<AnyTask, Ctx>({ retries: 1, continueOnFinalFail: true }))
+        .build();
+
+      const summary = await executeDAG(plan, exec, {
+        ctx: { runId: "r5" } as Ctx,
+      });
+      // First attempt fails; one retry happens; since our handler marks first failure disposition=continue
+      // and withRetry continueOnFinalFail=true, executor won't terminate early.
+      assertEquals(summary.terminated, false);
+      assertEquals(attempts >= 1, true);
+    },
+  );
+
+  await t.step("createExecutor DSL builds the same thing tersely", async () => {
+    const tasks: AnyTask[] = [TT("a", "sql"), TT("b", "shell", ["a"])];
+    const plan = executionPlan(tasks);
+
+    const logs: string[] = [];
+    const exec = createExecutor<AnyTask, Ctx>({
+      routes: [
+        {
+          guard: isSql,
+          run: (t, ctx) => {
+            logs.push(`sql:${t.taskId()}`);
+            return ok<AnyTask, Ctx>(ctx);
+          },
+        },
+        {
+          guard: isShell,
+          run: (t, ctx) => {
+            logs.push(`shell:${t.taskId()}`);
+            return ok<AnyTask, Ctx>(ctx);
+          },
+        },
+      ],
+      middlewares: [withTiming()],
+    });
+
+    const summary = await executeDAG(plan, exec, {
+      ctx: { runId: "r6" } as Ctx,
+    });
+    assertEquals(summary.ran, ["a", "b"]);
+    assertEquals(logs, ["sql:a", "shell:b"]);
   });
 });

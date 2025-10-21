@@ -1,55 +1,103 @@
-import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { z } from "jsr:@zod/zod@4";
-import {
-  Issue,
-  notebooks,
-  parsedTextComponents,
-  Source,
-} from "../universal/md-notebook.ts";
 import {
   fbPartialCandidate,
   fbPartialsCollection,
+  Issue,
   mdFencedBlockPartialSchema,
-} from "../universal/md-partial.ts";
-import {
+  notebooks,
+  parsedTextComponents,
   Playbook,
   PlaybookCodeCell,
   playbooks,
-} from "../universal/md-playbook.ts";
+  Source,
+} from "../markdown/notebook/mod.ts";
+import {
+  AnnotationCatalog,
+  extractAnnotationsFromText,
+} from "../universal/code-comments.ts";
+import {
+  languageRegistry,
+  LanguageSpec,
+  languageSpecSchema,
+} from "../universal/code.ts";
 import { Task } from "../universal/task.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
 
-export const shebangSchema = z.union([
-  z.object({ shebang: z.string(), source: z.string() }),
-  z.literal(false),
-]);
+export type TasksProvenance = string;
 
-/** Schema for typed TaskDirective from `Cell.info?` property */
-export const taskSchema = z.discriminatedUnion("strategy", [
-  z.object({
-    strategy: z.literal("Cliffy.Command"), // a "typed" command known to Spry like `spry make`
-    command: z.instanceof(Command),
-  }).strict(),
-  z.object({
-    strategy: z.literal("Deno.Command"), // "untyped" commands not known to Spry
-    command: z.string().min(1), // required, pass into Deno.Command.spawn()
-    arguments: z.array(z.string()).optional(), // pass into Deno.Command.spawn()
-    shebang: shebangSchema,
-  }).strict(),
-  z.object({
-    strategy: z.literal("Deno.Task"), // pass each line into cross platform `deno task --eval "X"`
-  }).strict(),
-]);
+export function annotationsFactory<Anns extends Record<string, unknown>>(
+  init: {
+    language: LanguageSpec;
+    prefix?: string;
+    defaults?: Partial<Anns>;
+    schema?: z.ZodType;
+  },
+) {
+  function transform(
+    catalog: Awaited<
+      ReturnType<typeof extractAnnotationsFromText<unknown>>
+    >,
+    opts?: { prefix?: string; defaults?: Partial<Anns> },
+  ) {
+    const { prefix, defaults } = opts ?? init;
+    const annotations = prefix
+      ? (catalog.items
+        .filter((it) => it.kind === "tag" && it.key?.startsWith(prefix))
+        .map((it) =>
+          [it.key!.slice(prefix.length), it.value ?? it.raw] as const
+        ))
+      : catalog.items.map((it) => [it.key!, it.value ?? it.raw] as const);
+    const found = annotations.length;
+    if (found == 0) {
+      if (!defaults) return undefined;
+      if (Object.keys(defaults).length == 0) return undefined;
+    }
+    return { ...defaults, ...Object.fromEntries(annotations) } as Anns;
+  }
+
+  async function catalog(source: string, language?: LanguageSpec) {
+    return await extractAnnotationsFromText<Anns>(
+      source,
+      language ?? init?.language,
+      {
+        tags: { multi: true, valueMode: "json" },
+        kv: false,
+        yaml: false,
+        json: false,
+      },
+    );
+  }
+
+  return { ...init, catalog, transform };
+}
+
+export type AnnotationsSupplier<Anns extends Record<string, unknown>> = {
+  readonly annotations: Anns;
+  readonly annsCatalog: AnnotationCatalog<Anns>;
+  readonly language: LanguageSpec;
+};
+
+export function isAnnotationsSupplier<Anns extends Record<string, unknown>>(
+  o: { language: LanguageSpec },
+): o is AnnotationsSupplier<Anns> {
+  return "annotations" in o && "annsCatalog" in o ? true : false;
+}
 
 /** Schema for typed TaskDirective from `Cell.info?` property */
 export const taskDirectiveSchema = z.discriminatedUnion("nature", [
   z.object({
     nature: z.literal("TASK"),
     identity: z.string().min(1), // required, names the task
-    source: z.string(),
-    task: taskSchema,
+    language: languageSpecSchema,
+    deps: z.array(z.string()).optional(), // dependencies which allow DAGs to be created
+  }).strict(),
+  z.object({
+    nature: z.literal("CONTENT"),
+    identity: z.string().min(1), // required, names the task
+    content: z.object().loose(),
+    language: languageSpecSchema.optional(),
     deps: z.array(z.string()).optional(), // dependencies which allow DAGs to be created
   }).strict(),
   z.object({
@@ -62,14 +110,37 @@ export type TaskDirective = z.infer<typeof taskDirectiveSchema>;
 
 export const isTaskDirectiveSupplier = (
   o: unknown,
-): o is { taskDirective: TaskDirective } =>
+): o is {
+  taskDirective: Extract<TaskDirective, { nature: "TASK" | "CONTENT" }>;
+} =>
   o && typeof o === "object" && "taskDirective" in o &&
     typeof o.taskDirective === "object"
     ? true
     : false;
 
 export type TaskCell<Provenance> = PlaybookCodeCell<Provenance> & Task & {
-  taskDirective: Extract<TaskDirective, { nature: "TASK" }>;
+  taskDirective: Extract<TaskDirective, { nature: "TASK" | "CONTENT" }>;
+};
+
+export function matchTaskNature<U extends TaskCell<TasksProvenance>>(
+  nature: TaskDirective["nature"],
+): (t: Task) => t is U {
+  return ((t: Task): t is U =>
+    isTaskDirectiveSupplier(t) ? t.taskDirective.nature === nature : false);
+}
+
+export const isPartialDirectiveSupplier = (
+  o: unknown,
+): o is {
+  partialDirective: Extract<TaskDirective, { nature: "PARTIAL" }>;
+} =>
+  o && typeof o === "object" && "partialDirective" in o &&
+    typeof o.partialDirective === "object"
+    ? true
+    : false;
+
+export type PartialCell<Provenance> = PlaybookCodeCell<Provenance> & {
+  partialDirective: Extract<TaskDirective, { nature: "PARTIAL" }>;
 };
 
 export type TaskDirectiveInspector<
@@ -85,12 +156,16 @@ export type TaskDirectiveInspector<
   },
 ) => TaskDirective | false;
 
-export function parsedInfo(candidate?: string) {
+const parsedInfoCache = new Map<string, ReturnType<typeof parsedInfoPrime>>();
+
+export function parsedInfoPrime(candidate?: string) {
   const ptc = parsedTextComponents(candidate);
   if (!ptc) return false;
 
   return {
     ...ptc,
+    identity: (idIfMissing: string) =>
+      ptc.argv.length > 0 ? ptc.argv[0] : idIfMissing,
     deps: () => {
       const flags = ptc.flags();
       return "dep" in flags
@@ -102,6 +177,17 @@ export function parsedInfo(candidate?: string) {
         : undefined;
     },
   };
+}
+
+export function parsedInfo(candidate?: string) {
+  if (!candidate) return false;
+
+  let pi = parsedInfoCache.get(candidate);
+  if (typeof pi === "undefined") {
+    pi = parsedInfoPrime(candidate);
+    parsedInfoCache.set(candidate, pi);
+  }
+  return pi;
 }
 
 export function partialsInspector<
@@ -135,100 +221,37 @@ export function partialsInspector<
   };
 }
 
-export const safeParseShebang = (source: string) =>
-  (source.startsWith("#!")
-    ? {
-      shebang: source.split("\n", 1)[0],
-      source: source.slice(source.indexOf("\n") + 1),
-    }
-    : false) satisfies z.infer<typeof shebangSchema>;
+export const spawnableLangIds = ["shell"] as const;
+export type SpawnableLangIds = typeof spawnableLangIds[number];
+export const spawnableLangSpecs = spawnableLangIds.map((lid) => {
+  const langSpec = languageRegistry.get(lid);
+  if (!langSpec) throw new Error("this should never happen");
+  return langSpec;
+});
 
-export const spryCodeCellLang = "spry" as const;
-export type SpryCodeCellLang = typeof spryCodeCellLang;
-
-export function spryParser<
+export function spawnableTDI<
   Provenance,
   Frontmatter extends Record<string, unknown> = Record<string, unknown>,
   CellAttrs extends Record<string, unknown> = Record<string, unknown>,
   I extends Issue<Provenance> = Issue<Provenance>,
 >(
-  isValidLanguage: (cell: PlaybookCodeCell<Provenance, CellAttrs>) => boolean =
-    (cell) => cell.language == spryCodeCellLang,
+  isValidLanguage: (
+    cell: PlaybookCodeCell<Provenance, CellAttrs>,
+  ) => LanguageSpec | undefined = (cell) =>
+    spawnableLangSpecs.find((lang) =>
+      lang.id == cell.language || lang.aliases?.find((a) => a == cell.language)
+    ),
 ): TaskDirectiveInspector<Provenance, Frontmatter, CellAttrs, I> {
   return ({ cell }) => {
-    if (!isValidLanguage(cell)) return false;
+    const language = isValidLanguage(cell);
+    if (!language) return false;
     const pi = parsedInfo(cell.info);
     if (!pi) return false; // TODO: should we warn about this or ignore it?
     return {
       nature: "TASK",
       identity: pi.first,
       source: cell.source,
-      task: {
-        strategy: "Cliffy.Command",
-        command: new Command(), // need `action` to perform task
-      },
-      deps: pi.deps(),
-    } satisfies TaskDirective;
-  };
-}
-
-// Supports https://docs.deno.com/runtime/reference/cli/task/
-export const denoTaskCodeCellLang = "deno-task" as const;
-export type DenoTaskCodeCellLang = typeof denoTaskCodeCellLang;
-
-export function denoTaskParser<
-  Provenance,
-  Frontmatter extends Record<string, unknown> = Record<string, unknown>,
-  CellAttrs extends Record<string, unknown> = Record<string, unknown>,
-  I extends Issue<Provenance> = Issue<Provenance>,
->(
-  isValidLanguage: (cell: PlaybookCodeCell<Provenance, CellAttrs>) => boolean =
-    (cell) => cell.language == denoTaskCodeCellLang,
-): TaskDirectiveInspector<Provenance, Frontmatter, CellAttrs, I> {
-  return ({ cell }) => {
-    if (!isValidLanguage(cell)) return false;
-    const pi = parsedInfo(cell.info);
-    if (!pi) return false; // TODO: should we warn about this or ignore it?
-    return {
-      nature: "TASK",
-      identity: pi.first,
-      source: cell.source,
-      task: { strategy: "Deno.Task" },
-      deps: pi.deps(),
-    };
-  };
-}
-
-// Supports any #! language
-export const bashCodeCellLang = "bash" as const;
-export const shCodeCellLang = "sh" as const;
-export const spawnableCellLangs = [shCodeCellLang, bashCodeCellLang] as const;
-export type SpawnableCellLang = typeof spawnableCellLangs[number];
-
-export function spawnableParser<
-  Provenance,
-  Frontmatter extends Record<string, unknown> = Record<string, unknown>,
-  CellAttrs extends Record<string, unknown> = Record<string, unknown>,
-  I extends Issue<Provenance> = Issue<Provenance>,
->(
-  isValidLanguage: (cell: PlaybookCodeCell<Provenance, CellAttrs>) => boolean =
-    (cell) =>
-      spawnableCellLangs.find((lang) => lang == cell.language) ? true : false,
-): TaskDirectiveInspector<Provenance, Frontmatter, CellAttrs, I> {
-  return ({ cell }) => {
-    if (!isValidLanguage(cell)) return false;
-    const pi = parsedInfo(cell.info);
-    if (!pi) return false; // TODO: should we warn about this or ignore it?
-    const shebang = safeParseShebang(cell.source);
-    return {
-      nature: "TASK",
-      identity: pi.first,
-      source: cell.source,
-      task: {
-        strategy: "Deno.Command",
-        command: "bash",
-        shebang,
-      },
+      language,
       deps: pi.deps(),
     };
   };
@@ -266,8 +289,10 @@ export class TaskDirectives<
     CellAttrs,
     I
   >[] = [];
+  readonly playbooks: Playbook<Provenance, Frontmatter, CellAttrs, I>[] = [];
   readonly issues: I[] = [];
   readonly tasks: TaskCell<Provenance>[] = [];
+  readonly partialDirectives: PartialCell<Provenance>[] = [];
 
   constructor(
     readonly partials: ReturnType<typeof fbPartialsCollection>,
@@ -282,9 +307,7 @@ export class TaskDirectives<
     else {
       this.use(
         partialsInspector(), // put this first
-        denoTaskParser(),
-        spawnableParser(),
-        spryParser(),
+        spawnableTDI(),
       );
     }
   }
@@ -372,9 +395,16 @@ export class TaskDirectives<
         switch (td.nature) {
           case "PARTIAL":
             this.partials.register(td.partial);
+            (cell as Any).partialDirective = td;
+            if (isPartialDirectiveSupplier(cell)) {
+              this.partialDirectives.push(cell as PartialCell<Provenance>);
+            } else {
+              throw new Error("This should never happen");
+            }
             return true;
 
-          case "TASK": {
+          case "TASK":
+          case "CONTENT": {
             (cell as Any).taskDirective = td;
             const task = cell as unknown as Task;
             task.taskId = () => td.identity;
@@ -491,12 +521,14 @@ export class TaskDirectives<
             }
             // if any issues were registered with the Notebook, populate them too
             registerIssue(...nb.issues);
+
             yield nb;
           }
         }(),
         { kind: "hr" },
       )
     ) {
+      this.playbooks.push(pb);
       for (const cell of pb.cells) {
         if (cell.kind === "code") {
           this.register(cell, pb, init);
