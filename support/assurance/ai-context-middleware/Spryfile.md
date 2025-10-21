@@ -162,9 +162,9 @@ ${pagination.navWithParams("regime")}
  
 ## SCF Control Prompt Details page
  
-```sql ai-context/details/scf-prompt-details.sql { route: { caption: "SCF Prompt Details"} }
+```sql ai-context/details/scf-prompt-details.sql { route: { caption: "SCF Prompt and policy Details"} }
 SELECT 'text' AS component,
-       $page_title || ' for SCF # ' || $scf_no AS title;
+       $page_title || ' for ' || $regime_raw_value AS title;
 
 
  
