@@ -8,7 +8,6 @@ import {
 } from "../markdown/notebook/mod.ts";
 import {
   annotationsFactory,
-  parsedInfo,
   TaskDirectiveInspector,
   TaskDirectives,
   TasksProvenance,
@@ -21,7 +20,6 @@ import {
 import { unsafeInterpolator } from "../universal/interpolate.ts";
 import { forestToStatelessViews } from "../universal/path-tree-tabular.ts";
 import { raw as rawSQL, SQL, sqlCat } from "../universal/sql-text.ts";
-import { executionPlan } from "../universal/task.ts";
 import { safeJsonStringify } from "../universal/tmpl-literal-aide.ts";
 import { dropUndef } from "./conf.ts";
 import {
@@ -80,10 +78,10 @@ export function sqlHeadCellTDI(): SqlPageTDI {
   const heads = counter(sqlTaskHead);
   return ({ cell }) => {
     if (cell.language != sqlCodeCellLangId) return false;
-    const pi = parsedInfo(cell.info);
+    const pi = cell.parsedInfo;
     if (!pi) return false; // no identity, ignore
-    if (pi.first.toLocaleUpperCase() != sqlTaskHead) return false;
-    const identity = pi.identity(`sql.d/head/${heads.nextText()}`);
+    if (pi.firstToken?.toLocaleUpperCase() != sqlTaskHead) return false;
+    const identity = pi.secondToken ?? `sql.d/head/${heads.nextText()}`;
     return {
       nature: "CONTENT",
       identity,
@@ -102,10 +100,10 @@ export function sqlTailCellTDI(): SqlPageTDI {
   const tails = counter(sqlTaskTail);
   return ({ cell }) => {
     if (cell.language != sqlCodeCellLangId) return false;
-    const pi = parsedInfo(cell.info);
+    const pi = cell.parsedInfo;
     if (!pi) return false; // no identity, ignore
-    if (pi.first.toLocaleUpperCase() != sqlTaskTail) return false;
-    const identity = pi.identity(`sql.d/head/${tails.nextText()}`);
+    if (pi.firstToken?.toLocaleUpperCase() != sqlTaskHead) return false;
+    const identity = pi.secondToken ?? `sql.d/head/${tails.nextText()}`;
     return {
       nature: "CONTENT",
       identity,
@@ -167,9 +165,9 @@ export function mutateRouteInCellAttrs(
 export function sqlPageFileCellTDI(): SqlPageTDI {
   return ({ cell, registerIssue }) => {
     if (cell.language != sqlCodeCellLangId) return false;
-    const pi = parsedInfo(cell.info);
-    if (!pi) return false; // no identity, ignore
-    const path = pi.first;
+    const pi = cell.parsedInfo;
+    if (!pi || !pi.firstToken) return false; // no identity, ignore
+    const path = pi.firstToken;
     mutateRouteInCellAttrs(cell, path, registerIssue);
     return {
       nature: "CONTENT",
@@ -264,9 +262,7 @@ export function sqlPageInterpolator() {
         const source = ic?.injection?.wrap(spfu.contents) ?? spfu.contents;
         errSource = source;
 
-        // NOTE: This is intentionally unsafe. Do not feed untrusted content.
-        // Assume you're treating code cell blocks as fully trusted source code.
-        const mutated = await unsafeInterp.interpolate(source, {
+        const commonLocals = {
           pagination: ctx.pagination,
           paginate: ctx.paginate,
           safeJsonStringify,
@@ -276,17 +272,26 @@ export function sqlPageInterpolator() {
           raw: rawSQL,
           ...spfu.cell?.attrs,
           ...spfu,
+        };
+
+        // NOTE: This is intentionally unsafe. Do not feed untrusted content.
+        // Assume you're treating code cell blocks as fully trusted source code.
+        const mutated = await unsafeInterp.interpolate(source, {
+          ...commonLocals,
           partial: async (
             name: string,
             partialLocals?: Record<string, unknown>,
           ) => {
             const found = directives.partials.get(name);
             if (found) {
+              const partialCell = directives.partialDirectives.find((pd) =>
+                pd.partialDirective.partial.identity == found.identity
+              );
               const { content: partial, interpolate, locals } = await found
                 .content({
                   ...partialLocals,
-                  ...spfu.cell?.attrs,
-                  ...spfu,
+                  ...commonLocals,
+                  partial: partialCell,
                 });
               if (!interpolate) return partial;
               return await unsafeInterp.interpolate(partial, locals, [{
@@ -387,8 +392,6 @@ export class SqlPagePlaybook {
     // directives now has all the tasks/content across all notebooks in memory
     await td.populate(() => this.sources(init));
 
-    const plan = executionPlan(state.directives.tasks);
-
     const spInterpolator = sqlPageInterpolator();
     const spiContext = spInterpolator.context(state);
     const unsafeInterp = unsafeInterpolator(spiContext);
@@ -399,7 +402,6 @@ export class SqlPagePlaybook {
 
     return {
       state,
-      executionPlan: plan,
       spInterpolator,
       spiContext,
       unsafeInterp,
@@ -422,7 +424,7 @@ export class SqlPagePlaybook {
     for (const pd of directives.partialDirectives) {
       yield sqlSPF(
         `spry.d/auto/partial/${pd.partialDirective.partial.identity}.auto.sql`,
-        `-- ${safeJsonStringify(pd)}\n${pd.partialDirective.partial.identity}`,
+        `-- ${safeJsonStringify(pd)}\n${pd.partialDirective.partial.source}`,
         { isPartial: true, cell: pd },
       );
     }
@@ -445,6 +447,18 @@ export class SqlPagePlaybook {
         yield mutated;
         if (td.content.cell) {
           const cell = td.content.cell;
+          yield jsonSPF(
+            `spry.d/auto/cell/${td.content.path}.auto.json`,
+            safeJsonStringify(cell, 2),
+            { cell, isAutoGenerated: true },
+          );
+          if (cell.instructions) {
+            yield jsonSPF(
+              `spry.d/auto/instructions/${td.content.path}.auto.md`,
+              cell.instructions.markdown,
+              { cell, isAutoGenerated: true },
+            );
+          }
           if (Object.entries(cell.attrs).length) {
             yield jsonSPF(
               `spry.d/auto/resource/${td.content.path}.auto.json`,
