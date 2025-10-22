@@ -112,29 +112,58 @@ ${pagination.navigation}
 
 ## Regime Explorer Page
 
-```sql ai-context/scf-explorer.sql { route: { caption: "SCF Control Regimes",description: "This page include the SCF Control Regimes" } }
+```sql ai-context/scf-explorer.sql { route: { caption: "SCF Control Regimes Group",description: "This page include the SCF Control Regimes " } }
 SELECT 'text' AS component,
        $page_title AS title;
 
-${paginate("scf_regime_count")}
+
+
+
+${paginate("opsfolio_regime_group_count")}
 
 SELECT 'table' AS component,
        TRUE     AS sort,
        'Regime' as  markdown,
        TRUE     AS search;              
 SELECT
- ${md.link("regime", [`'details/regime.sql?regime='`, "regime"])} as Regime,
+ ${md.link("regime_group", [`'details/regime.sql?regime_group='`, "regime_group"])} as  "Regime",
       control_count AS "Controls"
-FROM scf_regime_count
-ORDER BY control_count DESC, regime
+FROM opsfolio_regime_group_count
+ORDER BY control_count DESC
 ${pagination.limit};
 
 ${pagination.navigation}
 ```
 
-## Controls per regime (totals) details page
+## Regime under regime group
  
-```sql ai-context/details/regime.sql { route: { caption: "Controls per regime (totals) details"} }
+```sql ai-context/details/regime.sql { route: { caption: "Regimes"} }
+SELECT 'text' AS component,
+       $page_title  AS title;
+ 
+${paginate("opsfolio_regime_count", "WHERE regime_group = $regime_group")}
+
+ 
+SELECT 'table' AS component,
+       TRUE AS sort,
+       'Regime' AS markdown,
+       TRUE AS search; 
+SELECT 
+${md.link("regime", [`'/ai-context/details/scf-control-details.sql?regime='`, "regime"])} as "Regime",
+       control_count AS  "Controls"
+       
+FROM opsfolio_regime_count
+WHERE regime_group = $regime_group
+ORDER BY regime_group
+${pagination.limit};
+ 
+${pagination.navWithParams("regime_group")}
+```
+ 
+## SCF Control Prompt Details page
+ 
+```sql ai-context/details/scf-control-details.sql { route: { caption: "Controls per regime (totals) details"} }
+
 SELECT 'text' AS component,
        $page_title || ' for ' || $regime AS title;
  
@@ -158,8 +187,9 @@ ORDER BY scf_no
 ${pagination.limit};
  
 ${pagination.navWithParams("regime")}
+
 ```
- 
+
 ## SCF Control Prompt Details page
  
 ```sql ai-context/details/scf-prompt-details.sql { route: { caption: "SCF Prompt and policy Details"} }
