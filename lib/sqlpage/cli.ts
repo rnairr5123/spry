@@ -10,14 +10,22 @@ import {
   yellow,
 } from "jsr:@std/fmt@^1/colors";
 import { ensureDir } from "jsr:@std/fs@^1";
-import { dirname, globToRegExp, join, relative } from "jsr:@std/path@^1";
-import { basename } from "node:path";
+import {
+  basename,
+  dirname,
+  globToRegExp,
+  join,
+  relative,
+} from "jsr:@std/path@^1";
 import * as taskCLI from "../task/cli.ts";
 import { collectAsyncGenerated } from "../universal/collectable.ts";
 import { SourceRelativeTo } from "../universal/content-acquisition.ts";
+import { doctor } from "../universal/doctor.ts";
+import { eventBus } from "../universal/event-bus.ts";
 import { ColumnDef, ListerBuilder } from "../universal/lister-tabular-tui.ts";
 import { TreeLister } from "../universal/lister-tree-tui.ts";
-import { executionSubplan } from "../universal/task.ts";
+import { executionPlan, executionSubplan } from "../universal/task.ts";
+import { SidecarOpts, watcher, WatcherEvents } from "../universal/watcher.ts";
 import { sqlPageConf } from "./conf.ts";
 import {
   normalizeSPC,
@@ -265,9 +273,24 @@ export class CLI {
   }
 
   async *materializeFs(
-    opts: { md: string[]; srcRelTo: SourceRelativeTo; fs: string },
+    opts: {
+      md: string[];
+      srcRelTo: SourceRelativeTo;
+      fs: string;
+      destroyFirst?: boolean;
+    },
   ) {
     const { fs } = opts;
+    if (opts.destroyFirst) {
+      try {
+        await Deno.remove(fs, { recursive: true });
+        console.info(`Removed ${fs}`);
+      } catch (err) {
+        if (!(err instanceof Deno.errors.NotFound)) {
+          console.error(`Error while trying to remove ${fs}`, err);
+        }
+      }
+    }
     for await (
       const spf of normalizeSPC(this.spn.sqlPageFiles({
         mdSources: opts.md,
@@ -280,6 +303,70 @@ export class CLI {
       await Deno.writeTextFile(absPath, spf.contents);
       yield { ...spf, absPath };
     }
+  }
+
+  async materializeFsWatch(
+    opts: {
+      md: string[];
+      srcRelTo: SourceRelativeTo;
+      fs: string;
+      destroyFirst?: boolean;
+      watch?: boolean;
+      verbose?: boolean;
+      withSqlPage?: {
+        enabled?: boolean;
+        sitePrefix?: string;
+      };
+    },
+  ) {
+    const sidecars = opts.withSqlPage?.enabled
+      ? [
+        {
+          name: "sqlpage",
+          cmd: ["sqlpage"],
+          env: {
+            SQLPAGE_SITE_PREFIX: opts.withSqlPage?.sitePrefix ?? "",
+            ...Deno.env.toObject(),
+          },
+          shutdownSignal: "SIGTERM",
+          shutdownTimeoutMs: 1500,
+        } satisfies SidecarOpts,
+      ]
+      : undefined;
+
+    const bus = eventBus<WatcherEvents>();
+    const run = watcher(
+      opts.md,
+      async () => {
+        for await (const spf of this.materializeFs(opts)) {
+          if (opts.verbose) console.log(spf.path);
+        }
+      },
+      {
+        debounceMs: 120,
+        recursive: false,
+        bus,
+        sidecars,
+      },
+    );
+
+    // Example listeners (optional)
+    bus.on(
+      "run:begin",
+      (ev) =>
+        console.log(
+          `[watch] build ${ev.runIndex} begin with SQLPage: ${
+            opts.withSqlPage?.enabled ?? "no"
+          }`,
+        ),
+    );
+    bus.on("run:success", () => console.log("[watch] build success"));
+    bus.on(
+      "run:error",
+      ({ error }) => console.error("[watch] build error:", error),
+    );
+
+    await run(opts.watch);
   }
 
   command(name = "spry.ts") {
@@ -309,6 +396,12 @@ export class CLI {
         "SQLPage Markdown Notebook: emit SQL package, write sqlpage.json, or materialize filesystem.",
       )
       .command("help", new HelpCommand().global())
+      .command("doctor", "Show dependencies and their availability")
+      .action(async () => {
+        const diags = doctor(["deno --version", "sqlpage --version"]);
+        const result = await diags.run();
+        diags.render.cli(result);
+      })
       .command(
         "spc",
         new Command() // Emit SQL package (sqlite) to stdout; accepts md path
@@ -325,7 +418,22 @@ export class CLI {
           .option(
             "--fs <srcHome:string>",
             "Materialize SQL files under this directory.",
-            { conflicts: ["package"] },
+            { conflicts: ["package"], depends: ["conf"] },
+          )
+          .option(
+            "--destroy-first",
+            "Remove the directory that --fs points to before materializing SQL files",
+            { depends: ["fs"] },
+          )
+          .option(
+            "--watch",
+            "Materialize SQL files under this directory every time the markdown sources change",
+            { depends: ["fs"] },
+          )
+          .option(
+            "--with-sqlpage",
+            "Start a local SQLPage binary in dev mode pointing to the --fs directory",
+            { depends: ["watch"] },
           )
           // Write sqlpage.json to the given path
           .option(
@@ -336,17 +444,16 @@ export class CLI {
           .action(async (opts) => {
             // If --fs is present, materialize files under that root
             if (typeof opts.fs === "string" && opts.fs.length > 0) {
-              const generated = await Array.fromAsync(
-                this.materializeFs({
-                  // not sure why this mapping is needed, Cliffy seems to not type `default` for `collect`ed arrays properly?
-                  md: opts.md.map((f) => String(f)),
-                  srcRelTo: opts.srcRelTo,
-                  fs: opts.fs,
-                }),
-              );
-              if (opts.verbose) {
-                generated.forEach((f) => console.log(f.absPath));
-              }
+              await this.materializeFsWatch({
+                // not sure why this mapping is needed, Cliffy seems to not type `default` for `collect`ed arrays properly?
+                md: opts.md.map((f) => String(f)),
+                srcRelTo: opts.srcRelTo,
+                fs: opts.fs,
+                destroyFirst: opts.destroyFirst,
+                verbose: opts.verbose,
+                watch: opts?.watch,
+                withSqlPage: { enabled: opts.withSqlpage },
+              });
             }
 
             // If -p/--package is present (i.e., user requested SQL package), emit to stdout
@@ -432,22 +539,35 @@ export class CLI {
       .command(
         "task",
         new Command() // Emit SQL package (sqlite) to stdout; accepts md path
-          .description("Spry Task CLI")
+          .description(
+            "Spry Task CLI (execute a specific cell and dependencies)",
+          )
           .type("sourceRelTo", srcRelTo)
           .arguments("<taskId>")
           .option(...mdOpt)
           .option(...srcRelToOpt)
           .option("--verbose", "Emit information messages")
+          .option("--summarize", "Emit summary after execution in JSON")
           .action(async (opts, taskId) => {
             const pp = await this.spn.populateContent({
               mdSources: opts.md.map((f) => String(f)),
               srcRelTo: opts.srcRelTo,
               state: sqlPagePlaybookState(),
             });
-            taskCLI.executeTasks(
-              executionSubplan(pp.executionPlan, [taskId]),
+            const runbook = await taskCLI.executeTasks(
+              executionSubplan(
+                executionPlan(
+                  pp.state.directives.tasks.filter((t) =>
+                    t.taskDirective.nature === "TASK"
+                  ),
+                ),
+                [taskId],
+              ),
               opts.verbose ? "rich" : false,
             );
+            if (opts.summarize) {
+              console.log(runbook);
+            }
           })
           .command("ls", "List SQLPage file entries")
           .type("sourceRelTo", srcRelTo)
@@ -469,6 +589,49 @@ export class CLI {
                 : pp.state.directives.tasks.filter((t) =>
                   t.taskDirective.nature === "TASK"
                 ),
+            );
+          }),
+      ).command(
+        "runbook",
+        new Command() // Emit SQL package (sqlite) to stdout; accepts md path
+          .description("Spry Runbook CLI (execute all cells in DAG order)")
+          .type("sourceRelTo", srcRelTo)
+          .option(...mdOpt)
+          .option(...srcRelToOpt)
+          .option("--verbose", "Emit information messages verbosely")
+          .option("--summarize", "Emit summary after execution in JSON")
+          .action(async (opts) => {
+            const pp = await this.spn.populateContent({
+              mdSources: opts.md.map((f) => String(f)),
+              srcRelTo: opts.srcRelTo,
+              state: sqlPagePlaybookState(),
+            });
+            const runbook = await taskCLI.executeTasks(
+              executionPlan(
+                pp.state.directives.tasks.filter((t) =>
+                  t.taskDirective.nature === "TASK"
+                ),
+              ),
+              opts.verbose ? "rich" : false,
+            );
+            if (opts.summarize) {
+              console.log(runbook);
+            }
+          })
+          .command("ls", "List SQLPage file runbook entries")
+          .type("sourceRelTo", srcRelTo)
+          .option(...mdOpt)
+          .option(...srcRelToOpt)
+          .action(async (opts) => {
+            const pp = await this.spn.populateContent({
+              mdSources: opts.md.map((f) => String(f)),
+              srcRelTo: opts.srcRelTo,
+              state: sqlPagePlaybookState(),
+            });
+            taskCLI.ls(
+              pp.state.directives.tasks.filter((t) =>
+                t.taskDirective.nature === "TASK"
+              ),
             );
           }),
       );
