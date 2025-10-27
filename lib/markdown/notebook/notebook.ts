@@ -99,6 +99,11 @@ import { isAsyncIterator } from "../../universal/collectable.ts";
 export type Source<Provenance> = {
   provenance: Provenance;
   content: string | ReadableStream<Uint8Array>;
+  import?: (
+    src: string | string[],
+    cell: CodeCell<Provenance>,
+  ) => string | Promise<string>;
+  transformFrontmatter?: (fmRaw: string) => string | Promise<string>;
 };
 
 export type SourceStream<Provenance> =
@@ -136,6 +141,11 @@ export type Issue<Provenance> =
   | FrontmatterIssue<Provenance>
   | FenceIssue<Provenance>;
 
+export type ImportInstructionInfoFlags = {
+  import: string | string[];
+  "is-binary": boolean; // designed for ease of use by users in cells (not for devs)
+};
+
 /**
  * DX note:
  * - Juniors can just use Notebook without generics.
@@ -157,6 +167,24 @@ export type CodeCell<
   parsedInfo?: ReturnType<typeof parsedTextFlags>; // meta prefix before {...}
   startLine?: number;
   endLine?: number;
+  sourceElaboration?:
+    & {
+      isRefToBinary: boolean;
+    }
+    & (
+      | {
+        isRefToBinary: false;
+        importedFrom: string | string[];
+        original: string;
+      }
+      | {
+        isRefToBinary: true;
+        importedFrom: string;
+        encoding: "UTF-8";
+        rs?: ReadableStream<Uint8Array>;
+      }
+    );
+  isVirtual: boolean; // true if not found in markdown but "generated" via live-include
 };
 
 export type MarkdownCell<Provenance> = {
@@ -199,6 +227,7 @@ export type Notebook<
   /** mdast cache produced by the core parser (no need to re-parse later) */
   ast: NotebookAstCache;
   provenance: Provenance;
+  source: Source<Provenance>;
 };
 
 /* =========================== Public API ============================== */
@@ -215,12 +244,12 @@ function isSourceObject<Provenance>(x: unknown): x is Source<Provenance> {
  */
 export async function* normalizeSources<Provenance>(
   input: SourceStream<Provenance>,
-): AsyncIterable<[Provenance, string]> {
+): AsyncIterable<[Provenance, string, Source<Provenance>]> {
   // Single Source object
-  if (isSourceObject(input)) {
+  if (isSourceObject<Provenance>(input)) {
     const { provenance, content } = input;
     if (typeof content === "string") {
-      yield [provenance, content];
+      yield [provenance, content, input];
       return;
     }
     throw new TypeError("Unsupported Source.content type");
@@ -239,9 +268,9 @@ export async function* normalizeSources<Provenance>(
     }
     const { provenance, content } = value;
     if (typeof content === "string") {
-      yield [provenance, content];
+      yield [provenance, content, value];
     } else if (isReadableStream(content)) {
-      yield [provenance, await readStreamToText(content)];
+      yield [provenance, await readStreamToText(content), value];
     } else {
       throw new TypeError("Unsupported Source.content type");
     }
@@ -260,8 +289,12 @@ export async function* notebooks<
 >(
   input: SourceStream<Provenance>,
 ): AsyncGenerator<Notebook<Provenance, FM, Attrs, I>> {
-  for await (const [provenance, src] of normalizeSources(input)) {
-    const nb = parseDocument<Provenance, FM, Attrs, I>(provenance, src);
+  for await (const [provenance, src, srcSupplied] of normalizeSources(input)) {
+    const nb = await parseDocument<Provenance, FM, Attrs, I>(
+      provenance,
+      src,
+      srcSupplied,
+    );
     yield nb;
   }
 }
@@ -274,19 +307,19 @@ export const remarkProcessor = remark()
   .use(remarkStringify);
 
 /** Parse a single Markdown document into a Notebook<FM, Attrs, I>. */
-function parseDocument<
+async function parseDocument<
   Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
   I extends Issue<Provenance>,
->(provenance: Provenance, source: string) {
+>(provenance: Provenance, source: string, srcSupplied: Source<Provenance>) {
   type Dict = Record<string, unknown>;
 
   const issues: I[] = [];
 
   const tree = remarkProcessor.parse(source) as Root;
 
-  const { fm, fmEndIdx } = (() => {
+  const { fm, fmEndIdx } = await (async () => {
     type FMParseResult = { fm: FM; fmEndIdx: number };
     const children = Array.isArray(tree.children)
       ? (tree.children as ReadonlyArray<unknown>)
@@ -298,7 +331,9 @@ function parseDocument<
       const n = children[i];
 
       if (isYamlNode(n)) {
-        const raw = typeof n.value === "string" ? n.value : "";
+        const original = typeof n.value === "string" ? n.value : "";
+        const raw = await srcSupplied.transformFrontmatter?.(original) ??
+          original;
         try {
           fmRaw = (YAMLparse(raw) as Dict) ?? {};
         } catch (error) {
@@ -481,7 +516,33 @@ function parseDocument<
         parsedInfo,
         startLine: posStartLine(node),
         endLine: posEndLine(node),
+        isVirtual: false,
       };
+
+      if (srcSupplied.import && parsedInfo && "import" in parsedInfo.flags) {
+        const importSrc = parsedInfo.flags["import"];
+        if (typeof importSrc !== "boolean") {
+          const isRefToBinary = parsedInfo.flags["is-binary"] ? true : false;
+          if (isRefToBinary) {
+            codeCell.sourceElaboration = {
+              isRefToBinary: true,
+              encoding: "UTF-8",
+              importedFrom: typeof importSrc === "string"
+                ? importSrc
+                : importSrc[0],
+            };
+          } else {
+            const original = codeCell.source;
+            codeCell.source = await srcSupplied.import(importSrc, codeCell);
+            codeCell.sourceElaboration = {
+              isRefToBinary: false,
+              importedFrom: importSrc,
+              original,
+            };
+          }
+        }
+      }
+
       cells.push(codeCell);
       mdastByCell.push(null); // code cell: no mdast nodes
       codeCellIndices.push(cells.length - 1);
@@ -516,6 +577,7 @@ function parseDocument<
       codeCellIndices,
     },
     provenance,
+    source: srcSupplied,
   } satisfies Notebook<Provenance, FM, Attrs, I>;
 }
 

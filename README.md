@@ -68,7 +68,7 @@ in an empty directory to bootstrap your project:
 
 ```bash
 cd <your-project>  # create a new directory or use an existing one
-deno run -A https://raw.githubusercontent.com/programmablemd/spry/main/lib/sqlpage/cli.ts init
+deno run --node-modules-dir=auto -A https://raw.githubusercontent.com/programmablemd/spry/main/lib/sqlpage/cli.ts init
 ./spry.ts help
 ```
 
@@ -124,6 +124,7 @@ Zod.
 
 ### Next Steps
 
-- Explore [`Spryfile.md`](support/assurance/scf/Spryfile.md) to understand how tasks and SQLPage routes are defined.
+- Explore [`Spryfile.md`](support/assurance/scf/Spryfile.md) to understand how
+  tasks and SQLPage routes are defined.
 - Add more `bash` or `sql` fences to extend functionality.
 - Run `./spry.ts help` to see available commands.

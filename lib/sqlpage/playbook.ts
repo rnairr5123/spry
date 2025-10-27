@@ -1,9 +1,11 @@
-import { dirname } from "jsr:@std/path@^1";
+import { basename } from "jsr:@std/path@^1";
 import z from "jsr:@zod/zod@4";
 import { MarkdownDoc } from "../markdown/fluent-doc.ts";
 import {
   fbPartialsCollection,
   Issue,
+  isVirtualDirective,
+  parsedTextFlags,
   PlaybookCodeCell,
   Source,
 } from "../markdown/notebook/mod.ts";
@@ -13,7 +15,11 @@ import {
   TaskDirectives,
   TasksProvenance,
 } from "../task/cell.ts";
-import { ensureLanguageByIdOrAlias } from "../universal/code.ts";
+import {
+  ensureLanguageByIdOrAlias,
+  getLanguageByIdOrAlias,
+  LanguageSpec,
+} from "../universal/code.ts";
 import {
   safeSourceText,
   SourceRelativeTo,
@@ -34,9 +40,9 @@ import * as interp from "./interpolate.ts";
 import { markdownLinkFactory } from "./interpolate.ts";
 import {
   isRouteSupplier,
+  muateRoutePaths,
   PageRoute,
   pageRouteSchema,
-  pathExtensions,
   RoutesBuilder,
 } from "./route.ts";
 
@@ -75,14 +81,75 @@ export function counter<Identifier>(identifier: Identifier, padValue = 4) {
   return { identifier, incr, nextPadded, nextText };
 }
 
+/**
+ * Adjust the `parsedInfo` of a virtual import cell when it matches
+ * a **virtual HEAD or TAIL directive**.
+ *
+ * This helper normalizes generated import cells that come from
+ * patterns such as:
+ *
+ * ```markdown
+ * ```import
+ * sql **\/*.sql HEAD
+ * sql **\/*.sql TAIL
+ * ```
+ * ```
+ *
+ * When an imported cell is marked as "virtual" and its first token in
+ * `restParts` equals the provided `match` value (case-insensitive),
+ * the function rewrites its `parsedInfo` tokens to follow a canonical
+ * structure:
+ *
+ * - `firstToken` → `"HEAD"` or `"TAIL"`
+ * - `secondToken` → `"sql.d/{head|tail}/{originalFirstToken}"`
+ * - `bareTokens` → `[firstToken, secondToken]`
+ *
+ * This makes it easier for downstream SQLPage or Spry emitters to
+ * distinguish special pseudo-cells (HEAD/TAIL) from normal SQL imports.
+ *
+ * @param cell The virtual code cell to modify (must have `parsedInfo`)
+ * @param match The directive keyword to look for (e.g. `"HEAD"` or `"TAIL"`)
+ *
+ * @example
+ * ```ts
+ * fixupVirtualHeadTail(cell, "HEAD");
+ * // transforms:
+ * //   firstToken: "migrations/init.sql"
+ * // into:
+ * //   firstToken: "HEAD"
+ * //   secondToken: "sql.d/head/migrations/init.sql"
+ * ```
+ */
+export function fixupVirtualHeadTail(
+  cell: PlaybookCodeCell<string, SqlPageCellAttrs>,
+  match: string,
+) {
+  if (isVirtualDirective(cell) && cell.parsedInfo) {
+    // might look like `sql **/*.sql HEAD` or `sql **/*.sql TAIL`
+    // restParts is string tokens that come after the glob / remote
+    const firstGenDirecToken = cell.virtualDirective.restParts[0];
+    if (firstGenDirecToken.toUpperCase() == match.toUpperCase()) {
+      // switch to `sql HEAD file.sql` or `sql TAIL file.sql`
+      cell.parsedInfo.secondToken =
+        `sql.d/${match.toLowerCase()}/${cell.parsedInfo.firstToken}`;
+      cell.parsedInfo.firstToken = match;
+      cell.parsedInfo.bareTokens = [
+        cell.parsedInfo.firstToken,
+        cell.parsedInfo.secondToken,
+      ];
+    }
+  }
+}
+
 export function sqlHeadCellTDI(): SqlPageTDI {
   const heads = counter(sqlTaskHead);
   return ({ cell }) => {
     if (cell.language != sqlCodeCellLangId) return false;
+    fixupVirtualHeadTail(cell, sqlTaskHead);
     const pi = cell.parsedInfo;
     if (!pi) return false; // no identity, ignore
     if (pi.firstToken?.toLocaleUpperCase() != sqlTaskHead) return false;
-    const identity = pi.secondToken ?? `sql.d/head/${heads.nextText()}`;
+    const identity = pi.bareTokens[1] ?? `sql.d/head/${heads.nextText()}.sql`;
     return {
       nature: "CONTENT",
       identity,
@@ -101,10 +168,11 @@ export function sqlTailCellTDI(): SqlPageTDI {
   const tails = counter(sqlTaskTail);
   return ({ cell }) => {
     if (cell.language != sqlCodeCellLangId) return false;
+    fixupVirtualHeadTail(cell, sqlTaskTail);
     const pi = cell.parsedInfo;
     if (!pi) return false; // no identity, ignore
-    if (pi.firstToken?.toLocaleUpperCase() != sqlTaskHead) return false;
-    const identity = pi.secondToken ?? `sql.d/head/${tails.nextText()}`;
+    if (pi.firstToken?.toLocaleUpperCase() != sqlTaskTail) return false;
+    const identity = pi.bareTokens[1] ?? `sql.d/tail/${tails.nextText()}.sql`;
     return {
       nature: "CONTENT",
       identity,
@@ -140,7 +208,8 @@ export function mutateRouteInCellAttrs(
   // if no route was supplied in the cell attributes, use what's in annotations
   if (!isRouteSupplier(cell.attrs)) {
     if (candidateAnns) cell.attrs.route = candidateAnns;
-    return validated(cell.attrs.route);
+    const mrp = muateRoutePaths(cell.attrs.route as PageRoute, identity);
+    return mrp || validated(cell.attrs.route);
   }
 
   // if route was supplied in the cell attributes, merge with annotations with
@@ -148,28 +217,37 @@ export function mutateRouteInCellAttrs(
   if (isRouteSupplier(cell.attrs) && candidateAnns) {
     // deno-lint-ignore no-explicit-any
     (cell.attrs as any).route = { ...cell.attrs.route, ...candidateAnns };
-    return validated(cell.attrs.route);
+    const mrp = muateRoutePaths(cell.attrs.route as PageRoute, identity);
+    return mrp || validated(cell.attrs.route);
   }
 
-  // if we get to here, it's the first time we're seeing cell attributes
-  const route = cell.attrs.route as PageRoute;
-  if (!route.path) route.path = identity;
-  const extensions = pathExtensions(route.path);
-  route.pathBasename = extensions.basename;
-  route.pathBasenameNoExtn = extensions.basename.split(".")[0];
-  route.pathDirname = dirname(route.path);
-  route.pathExtnTerminal = extensions.terminal;
-  route.pathExtns = extensions.extensions;
-  return validated(route);
+  return false;
 }
 
-export function sqlPageFileCellTDI(): SqlPageTDI {
+export function typicalCellFlags(pi: ReturnType<typeof parsedTextFlags>) {
+  return {
+    isUnsafeInterpolatable: "I" in pi.flags || "interpolate" in pi.flags,
+    isInjectableCandidate: "J" in pi.flags || "injectable" in pi.flags,
+  };
+}
+
+export function sqlPageFileLangCellTDI(
+  language: LanguageSpec,
+  spfi:
+    & Pick<
+      SqlPageFileUpsert,
+      "asErrorContents" | "isUnsafeInterpolatable" | "isInjectableCandidate"
+    >
+    & { isRoutable: boolean },
+): SqlPageTDI {
   return ({ cell, registerIssue }) => {
-    if (cell.language != sqlCodeCellLangId) return false;
+    const langs = [language.id];
+    if (language.aliases) langs.push(...language.aliases);
+    if (!langs.find((l) => l === cell.language)) return false;
     const pi = cell.parsedInfo;
     if (!pi || !pi.firstToken) return false; // no identity, ignore
     const path = pi.firstToken;
-    mutateRouteInCellAttrs(cell, path, registerIssue);
+    if (spfi.isRoutable) mutateRouteInCellAttrs(cell, path, registerIssue);
     return {
       nature: "CONTENT",
       identity: path,
@@ -178,11 +256,66 @@ export function sqlPageFileCellTDI(): SqlPageTDI {
         path,
         contents: cell.source,
         cell,
-        asErrorContents: (text) => text.replaceAll(/^/gm, "-- "),
-        isUnsafeInterpolatable: true,
-        isInjectableCandidate: true,
+        asErrorContents: spfi.asErrorContents,
+        isUnsafeInterpolatable: spfi.isUnsafeInterpolatable,
+        isInjectableCandidate: spfi.isInjectableCandidate,
+        isBinary: false,
       } satisfies SqlPageContent,
-      language: sqlCodeCellLangSpec,
+      language,
+    };
+  };
+}
+
+export function sqlPageFileSqlCellTDI() {
+  return sqlPageFileLangCellTDI(sqlCodeCellLangSpec, {
+    asErrorContents: (text) => text.replaceAll(/^/gm, "-- "),
+    isRoutable: false,
+    isUnsafeInterpolatable: true,
+    isInjectableCandidate: true,
+  });
+}
+
+export function sqlPageFileCssCellTDI() {
+  return sqlPageFileLangCellTDI(getLanguageByIdOrAlias("css")!, {
+    asErrorContents: (text) => text.replaceAll(/^/gm, "// "),
+    isRoutable: false,
+    isUnsafeInterpolatable: true,
+    isInjectableCandidate: false,
+  });
+}
+
+export function sqlPageFileJsCellTDI() {
+  return sqlPageFileLangCellTDI(getLanguageByIdOrAlias("js")!, {
+    asErrorContents: (text) => text.replaceAll(/^/gm, "// "),
+    isRoutable: false,
+    isUnsafeInterpolatable: true,
+    isInjectableCandidate: false,
+  });
+}
+
+export function sqlPageFileAnyCellWithSpcFlagTDI(): SqlPageTDI {
+  return ({ cell }) => {
+    const pi = cell.parsedInfo;
+    if (!pi || !pi.firstToken) return false; // no identity, ignore
+    if (!("spc" in pi.flags)) return false;
+    const path = pi.firstToken;
+    const tcf = typicalCellFlags(pi);
+    return {
+      nature: "CONTENT",
+      identity: path,
+      content: {
+        kind: "sqlpage_file_upsert",
+        path,
+        contents: cell.sourceElaboration?.isRefToBinary
+          ? cell.sourceElaboration.rs ?? cell.source
+          : cell.source,
+        cell,
+        asErrorContents: (supplied) => supplied,
+        isBinary: cell.sourceElaboration?.isRefToBinary
+          ? cell.sourceElaboration.rs ?? false
+          : false,
+        ...tcf,
+      } satisfies SqlPageContent,
     };
   };
 }
@@ -197,7 +330,10 @@ export function sqlPagePlaybookState() {
   >(partials);
   directives.use(sqlHeadCellTDI());
   directives.use(sqlTailCellTDI());
-  directives.use(sqlPageFileCellTDI()); // order matters, put head/tail before SqlPageFile
+  directives.use(sqlPageFileSqlCellTDI()); // order matters, put head/tail before SqlPageFile
+  directives.use(sqlPageFileCssCellTDI());
+  directives.use(sqlPageFileJsCellTDI());
+  directives.use(sqlPageFileAnyCellWithSpcFlagTDI());
   const routes = new RoutesBuilder();
   const spp = sqlPagePathsFactory();
   return { directives, routes, spp, partials };
@@ -205,7 +341,37 @@ export function sqlPagePlaybookState() {
 
 export type SqlPagePlaybookState = ReturnType<typeof sqlPagePlaybookState>;
 
-export function sqlPageInterpolator() {
+export function frontmatterInterpolator<Project>(project: Project) {
+  const context = () => {
+    return {
+      project, // fully custom, can be anything passed from project init location
+      env: Deno.env.toObject(),
+    };
+  };
+
+  // "unsafely" means we're using JavaScript "eval"
+  async function mutateUnsafely(
+    ctx: ReturnType<typeof context>,
+    fmRaw: string,
+    unsafeInterp: ReturnType<typeof unsafeInterpolator>,
+  ) {
+    try {
+      // NOTE: This is intentionally unsafe. Do not feed untrusted content.
+      // Assume you're treating code cell blocks as fully trusted source code.
+      const mutated = await unsafeInterp.interpolate(fmRaw, ctx);
+      if (mutated !== fmRaw) return mutated;
+      return fmRaw;
+    } catch (error) {
+      return `SPRY_ERROR: "frontmatterInterpolator.mutateUnsafely"\nSPRY_ERROR_MESSAGE: "${
+        String(error)
+      }"\n${fmRaw}`;
+    }
+  }
+
+  return { context, mutateUnsafely };
+}
+
+export function sqlPageInterpolator<Project>(project: Project) {
   const context = (state: SqlPagePlaybookState) => {
     const { directives, routes } = state;
     const pagination = {
@@ -217,7 +383,10 @@ export function sqlPageInterpolator() {
       navWithParams: (..._extraQueryParams: string[]) =>
         `/* \${paginate("tableOrViewName")} not called yet*/`,
     };
+
     return {
+      project, // fully custom, can be anything passed from project init location
+      env: Deno.env.toObject(),
       state,
       directives,
       routes,
@@ -259,7 +428,7 @@ export function sqlPageInterpolator() {
         ? directives.partials.findInjectableForPath(path)
         : undefined;
 
-      if (spfu.isUnsafeInterpolatable) {
+      if (spfu.isUnsafeInterpolatable && typeof spfu.contents === "string") {
         const source = ic?.injection?.wrap(spfu.contents) ?? spfu.contents;
         errSource = source;
 
@@ -308,7 +477,7 @@ export function sqlPageInterpolator() {
           spfu.contents = String(mutated);
           spfu.isInterpolated = true;
         }
-      } else if (ic && ic.injection) {
+      } else if (ic && ic.injection && typeof spfu.contents === "string") {
         spfu.contents = ic.injection.wrap(spfu.contents);
       }
 
@@ -345,11 +514,15 @@ export function sqlPageInterpolator() {
   return { context, mutateUpsertUnsafely, mutateContentUnsafely };
 }
 
-export class SqlPagePlaybook {
-  protected constructor() {
+export class SqlPagePlaybook<Project> {
+  protected constructor(readonly project: Project) {
   }
 
   async *sources(init: { mdSources: string[]; srcRelTo: SourceRelativeTo }) {
+    const fmi = frontmatterInterpolator(this.project);
+    const fmiCtx = fmi.context();
+    const unsafeInterp = unsafeInterpolator(fmiCtx);
+
     for await (const md of init.mdSources) {
       const safeMdSrc = await safeSourceText(md, init.srcRelTo, {
         baseUrl: new URL(import.meta.url),
@@ -363,6 +536,25 @@ export class SqlPagePlaybook {
           ? safeMdSrc.source
           : safeMdSrc.source.href,
         content: safeMdSrc.text,
+        import: async (src, cell) => {
+          const all = typeof src === "string" ? [src] : src;
+          let result = "";
+          for (const s of all) {
+            const safeImportSrc = await safeSourceText(s, init.srcRelTo);
+            if (safeImportSrc.nature == "error") {
+              const err = safeImportSrc.error;
+              return `❌ ${err.name} in import from ${cell.provenance} line ${cell.startLine}\n\n${err.message}${
+                err.stack
+                  ? "\n" + err.stack.split("\n").slice(1).join("\n")
+                  : ""
+              }`;
+            }
+            result += safeImportSrc.text;
+          }
+          return result;
+        },
+        transformFrontmatter: (fmRaw) =>
+          fmi.mutateUnsafely(fmiCtx, fmRaw, unsafeInterp),
       } satisfies Source<SqlPageProvenance>;
     }
   }
@@ -393,7 +585,7 @@ export class SqlPagePlaybook {
     // directives now has all the tasks/content across all notebooks in memory
     await td.populate(() => this.sources(init));
 
-    const spInterpolator = sqlPageInterpolator();
+    const spInterpolator = sqlPageInterpolator(this.project);
     const spiContext = spInterpolator.context(state);
     const unsafeInterp = unsafeInterpolator(spiContext);
     const routeAnnsF = annotationsFactory({
@@ -422,6 +614,13 @@ export class SqlPagePlaybook {
     const { directives, routes } = state;
     const { sql: sqlSPF, json: jsonSPF } = sqlPageContentHelpers();
 
+    for (const pb of directives.playbooks) {
+      yield sqlSPF(
+        `spry.d/auto/frontmatter/${basename(pb.notebook.provenance)}.auto.json`,
+        JSON.stringify(pb.notebook.fm, null, 2),
+      );
+    }
+
     for (const pd of directives.partialDirectives) {
       yield sqlSPF(
         `spry.d/auto/partial/${pd.partialDirective.partial.identity}.auto.sql`,
@@ -439,12 +638,14 @@ export class SqlPagePlaybook {
           td.content,
           unsafeInterp,
         );
-        // see if any @route.* annotations are supplied in the mutated content
-        // and merge them with existing { route: {...} } cell
-        const route = routeAnnsF.transform(
-          await routeAnnsF.catalog(mutated.contents),
-        );
-        if (route) mutateRouteInCellAttrs(t, mutated.path, undefined, route);
+        if (typeof mutated.contents === "string") {
+          // see if any @route.* annotations are supplied in the mutated content
+          // and merge them with existing { route: {...} } cell
+          const route = routeAnnsF.transform(
+            await routeAnnsF.catalog(mutated.contents),
+          );
+          if (route) mutateRouteInCellAttrs(t, mutated.path, undefined, route);
+        }
         yield mutated;
         if (td.content.cell) {
           const cell = td.content.cell;
@@ -539,6 +740,8 @@ export class SqlPagePlaybook {
       md.li("`../sql.d/head/*.sql` contains `HEAD` SQL files that are inserted before sqlpage_files upserts")
       md.li("`../sql.d/tail/*.sql` contains `TAIL` SQL files that are inserted after sqlpage_files upserts")
       md.li("[`../sql.d/tail/navigation.auto.sql`](../sql.d/tail/navigation.auto.sql) contains `TAIL` SQL file which describes all the JSON content in relational database format")
+      md.li("`auto/cell/` directory contains each markdown source file's cells in JSON.")
+      md.li("`auto/frontmatter/` directory contains each markdown source file's frontmatter in JSON (after it's been interpolated).")
       md.li("`auto/instructions/` directory contains the markdown source before each SQLPage `sql` fenced blocks individually.")
       md.li("`auto/resource/` directory contains parsed fence attributes blocks like { route: { ... } } and `@spry.*` with `@route.*` embedded annotations for each route / endpoint individually.")
       md.li("`auto/route/` directory contains route annotations JSON for each route / endpoint individually.")
@@ -552,7 +755,7 @@ export class SqlPagePlaybook {
       return md;
   }
 
-  static instance() {
-    return new SqlPagePlaybook();
+  static instance<Project>(project: Project) {
+    return new SqlPagePlaybook(project);
   }
 }
