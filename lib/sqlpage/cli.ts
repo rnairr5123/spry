@@ -20,6 +20,7 @@ import {
 } from "jsr:@std/path@^1";
 import { MarkdownDoc } from "../markdown/fluent-doc.ts";
 import * as taskCLI from "../task/cli.ts";
+import { executeTasks } from "../task/mod.ts";
 import { collectAsyncGenerated } from "../universal/collectable.ts";
 import { SourceRelativeTo } from "../universal/content-acquisition.ts";
 import { doctor } from "../universal/doctor.ts";
@@ -35,6 +36,7 @@ import { sqlPageConf } from "./conf.ts";
 import {
   normalizeSPC,
   SqlPageContent,
+  SqlPageFilesUpsertDialect,
   sqlPageFilesUpsertDML,
 } from "./content.ts";
 import { SqlPagePlaybook, sqlPagePlaybookState } from "./playbook.ts";
@@ -200,7 +202,10 @@ export class CLI<Project> {
 
   async init(
     projectHome = Deno.cwd(),
-    init?: { dbName: string; force?: boolean },
+    init?: {
+      force?: boolean;
+      dialect?: SqlPageFilesUpsertDialect;
+    },
   ) {
     const {
       absPathToSpryTsLocal,
@@ -244,15 +249,77 @@ export class CLI<Project> {
     const webRoot = "dev-src.auto";
     if (!await exists(absPathToSpryfileLocal)) {
       const sfMD = new MarkdownDoc();
-      sfMD.frontMatterOnce({
+      const frontMatter = {
         "sqlpage-conf": {
           allow_exec: true,
-          port: 9227,
-          database_url: `sqlite://${init?.dbName ?? "sqlpage.db"}?mode=rwc`,
+          port: "${env.PORT}",
+          database_url: "${env.SPRY_DB}",
           web_root: `./${webRoot}`,
+          ...(init?.dialect === SqlPageFilesUpsertDialect.PostgreSQL
+            ? { listen_on: "0.0.0.0:${env.PORT}" }
+            : {}),
         },
-      });
+      };
+      sfMD.frontMatterOnce(frontMatter);
       sfMD.h1("Sample Spryfile.md");
+      sfMD.title(2, "Environment variables and .envrc");
+      sfMD.p(
+        "Recommended practice is to keep these values in a local, directory-scoped environment file. If you use direnv (recommended), create a file named `.envrc` in this directory.",
+      );
+      sfMD.p("POSIX-style example (bash/zsh):");
+      sfMD.codeTag(
+        `bash`,
+      )`# .envrc (bash/zsh)\nexport SPRY_DB=${
+        init?.dialect === SqlPageFilesUpsertDialect.PostgreSQL
+          ? `"postgresql://<username>:<password>@<host>:<port>/<database>"`
+          : `"sqlite://sqlpage.db?mode=rwc"`
+      }\nexport PORT=9227`;
+      sfMD.p(
+        "Then run `direnv allow` in this project directory to load the `.envrc` into your shell environment. direnv will evaluate `.envrc` only after you explicitly allow it.",
+      );
+      sfMD.title(2, "SQLPage Dev / Watch mode");
+      sfMD.p(
+        "While you're developing, Spry's `dev-src.auto` generator should be used:",
+      );
+      sfMD.codeTag(
+        `bash prepare-sqlpage-dev --descr "Generate the dev-src.auto directory to work in ${init?.dialect} dev mode"`,
+      )`./spry.ts spc --fs dev-src.auto --destroy-first --conf sqlpage/sqlpage.json`;
+      sfMD.codeTag(
+        `bash clean --descr "Clean up the project directory's generated artifacts"`,
+      )`rm -rf dev-src.auto`;
+      sfMD.p(
+        "In development mode, here’s the `--watch` convenience you can use so that\nwhenever you update `Spryfile.md`, it regenerates the SQLPage `dev-src.auto`,\nwhich is then picked up automatically by the SQLPage server:",
+      );
+      sfMD.codeTag(
+        `bash`,
+      )`./spry.ts spc --fs dev-src.auto --destroy-first --conf sqlpage/sqlpage.json --watch --with-sqlpage`;
+      sfMD.ul(
+        "--watch` turns on watching all `--md` files passed in (defaults to `Spryfile.md`)",
+      );
+      sfMD.ul("--with-sqlpage` starts and stops SQLPage after each build");
+      sfMD.p(
+        "Restarting SQLPage after each re-generation of dev-src.auto is **not**\nnecessary, so you can also use `--watch` without `--with-sqlpage` in one\nterminal window while keeping the SQLPage server running in another terminal\nwindow.",
+      );
+      sfMD.p("If you're running SQLPage in another terminal window, use:");
+      sfMD.codeTag(
+        `bash`,
+      )`./spry.ts spc --fs dev-src.auto --destroy-first --conf sqlpage/sqlpage.json --watch`;
+      sfMD.title(2, "SQLPage single database deployment mode");
+      sfMD.p(
+        "After development is complete, the `dev-src.auto` can be removed and single-database deployment can be used:",
+      );
+      sfMD.codeTag(
+        `bash deploy --descr "Generate sqlpage_files table upsert SQL and push them to ${init?.dialect}"`,
+      )`rm -rf dev-src.auto\n./spry.ts spc --package ${
+        init?.dialect ? `--dialect ${init?.dialect}` : ``
+      } --conf sqlpage/sqlpage.json | ${
+        init?.dialect === "postgres" ? `psql` : `sqlite3`
+      } "$SPRY_DB"`;
+      sfMD.title(2, "Start the SQLPage server");
+      sfMD.codeTag(
+        `bash`,
+      )`SQLPAGE_SITE_PREFIX="" sqlpage`;
+
       sfMD.p("You can create fenced cells for `bash`, `sql`, etc. here.");
       sfMD.p("TODO: add examples with `doctor`, `prepare-db`, etc.");
       sfMD.codeTag(
@@ -333,7 +400,7 @@ export class CLI<Project> {
       md: string[];
       srcRelTo: SourceRelativeTo;
       conf?: boolean;
-      info?: boolean;
+      pi?: boolean;
       infoAttrs?: boolean;
       tree?: boolean;
     },
@@ -395,7 +462,7 @@ export class CLI<Project> {
         .byPath({ pathKey: "path", separator: "/" })
         .treeOn("name");
       await tree.ls(true);
-    } else if (opts.info || opts.infoAttrs) {
+    } else if (opts.pi || opts.infoAttrs) {
       const pc = await this.spn.populateContent({
         mdSources: opts.md,
         srcRelTo: opts.srcRelTo,
@@ -405,7 +472,7 @@ export class CLI<Project> {
         {
           line: number;
           language: string;
-          info: string;
+          pi: string;
           virtual: string;
           binary: string;
           notebook: string;
@@ -414,7 +481,7 @@ export class CLI<Project> {
         .declareColumns(
           "line",
           "language",
-          "info",
+          "pi",
           "virtual",
           "binary",
           "notebook",
@@ -423,7 +490,7 @@ export class CLI<Project> {
           pc.state.directives.tasks.map((cell) => ({
             line: cell.startLine ?? -1,
             language: cell.language ?? "?",
-            info: cell.info ?? "?",
+            pi: cell.pi ?? "?",
             virtual: cell.isVirtual ? "V" : " ",
             binary: cell.sourceElaboration?.isRefToBinary ? "B" : " ",
             notebook: cell.provenance ?? "",
@@ -433,7 +500,7 @@ export class CLI<Project> {
         .field("language", "language", { header: "Lang" })
         .field("virtual", "virtual", { header: "V" })
         .field("binary", "binary", { header: "B" })
-        .field("info", "info", { header: "Cell Info" })
+        .field("pi", "pi", { header: "Cell PI" })
         .field("notebook", "notebook", this.lsColorPathField("Notebook"))
         .build()
         .ls(true);
@@ -580,6 +647,7 @@ export class CLI<Project> {
   command(name = "spry.ts") {
     // Enum type with enum.
     const srcRelTo = new EnumType(SourceRelativeTo);
+    const dialect = new EnumType(SqlPageFilesUpsertDialect);
     const mdOpt = [
       "-m, --md <mdPath:string>",
       "Use the given Markdown source(s), multiple allowed",
@@ -599,6 +667,7 @@ export class CLI<Project> {
 
     return new Command()
       .name(name)
+      .type("dialect", dialect)
       .version(() => computeSemVerSync(import.meta.url))
       .description(
         "SQLPage Markdown Notebook: emit SQL package, write sqlpage.json, or materialize filesystem.",
@@ -608,12 +677,17 @@ export class CLI<Project> {
         "init",
         "Setup Spryfile.md and spry.ts for local dev environment",
       )
-      .option("--db-name <file>", "name of SQLite database", {
+      /* .option("--db-name <file>", "name of SQLite database", {
         default: "sqlpage.db",
-      })
+      }) */
       .option("--force", "Remove existing and recreate from latest tag", {
         default: false,
       })
+      .option(
+        "-d, --dialect <dialect:dialect>",
+        "SQL dialect for package generation (sqlite or postgres)",
+        { default: SqlPageFilesUpsertDialect.SQLite },
+      )
       .action(async (opts) => {
         const { created, removed, ignored, gitignore: gi } = await this.init(
           Deno.cwd(),
@@ -640,12 +714,18 @@ export class CLI<Project> {
         new Command() // Emit SQL package (sqlite) to stdout; accepts md path
           .description("SQLPage Content (spc) CLI")
           .type("sourceRelTo", srcRelTo)
+          .type("dialect", dialect)
           .option(...mdOpt)
           .option(...srcRelToOpt)
           .option(
             "-p, --package",
-            "Emit SQL package (sqlite) to stdout from the given markdown path.",
+            "Emit SQL package to stdout from the given markdown path",
             { conflicts: ["fs"] },
+          )
+          .option(
+            "-d, --dialect <dialect:dialect>",
+            "SQL dialect for package generation (sqlite or postgres)",
+            { default: SqlPageFilesUpsertDialect.SQLite },
           )
           // Materialize files to a target directory
           .option(
@@ -707,7 +787,9 @@ export class CLI<Project> {
                     state: sqlPagePlaybookState(),
                   }),
                   {
-                    dialect: "sqlite",
+                    dialect: opts.dialect
+                      ? opts.dialect
+                      : SqlPageFilesUpsertDialect.SQLite,
                     includeSqlPageFilesTable: true,
                   },
                 )
@@ -756,11 +838,11 @@ export class CLI<Project> {
           .option(...mdOpt)
           .option(...srcRelToOpt)
           .option(
-            "-i, --info",
+            "-i, --pi",
             "Show just the cell names and INFO lines for each cell",
           )
           .option(
-            "-I, --info-attrs",
+            "-I, --pi-attrs",
             "Show just the cell names and INFO and attributes for each cell",
           )
           .option("-t, --tree", "Show as tree")
@@ -807,8 +889,9 @@ export class CLI<Project> {
               t.taskDirective.nature === "TASK"
             );
             if (tasks.find((t) => t.taskId() == taskId)) {
-              const runbook = await taskCLI.executeTasks(
+              const runbook = await executeTasks(
                 executionSubplan(executionPlan(tasks), [taskId]),
+                pp.state.directives,
                 opts.verbose ? "rich" : false,
               );
               if (opts.summarize) {
@@ -855,12 +938,13 @@ export class CLI<Project> {
               srcRelTo: opts.srcRelTo,
               state: sqlPagePlaybookState(),
             });
-            const runbook = await taskCLI.executeTasks(
+            const runbook = await executeTasks(
               executionPlan(
                 pp.state.directives.tasks.filter((t) =>
                   t.taskDirective.nature === "TASK"
                 ),
               ),
+              pp.state.directives,
               opts.verbose ? "rich" : false,
             );
             if (opts.summarize) {
