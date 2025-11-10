@@ -3,14 +3,13 @@ import z from "jsr:@zod/zod@4";
 import { MarkdownDoc } from "../markdown/fluent-doc.ts";
 import {
   fbPartialsCollection,
-  Issue,
   isVirtualDirective,
   parsedProcessingInstructions,
   PlaybookCodeCell,
-  Source,
 } from "../markdown/notebook/mod.ts";
 import {
   annotationsFactory,
+  anyNamedContentTDI,
   TaskDirectiveInspector,
   TaskDirectives,
   TasksProvenance,
@@ -45,6 +44,7 @@ import {
   pageRouteSchema,
   RoutesBuilder,
 } from "./route.ts";
+import { Issue, Source } from "../markdown/governedmd.ts";
 
 export type SqlPageProvenance = TasksProvenance;
 export type SqlPageFrontmatter = Record<string, unknown> & {
@@ -336,6 +336,7 @@ export function sqlPagePlaybookState() {
   directives.use(sqlPageFileCssCellTDI());
   directives.use(sqlPageFileJsCellTDI());
   directives.use(sqlPageFileAnyCellWithSpcFlagTDI());
+  directives.use(anyNamedContentTDI()); // put this last as a "catch all"
   const routes = new RoutesBuilder();
   const spp = sqlPagePathsFactory();
   return { directives, routes, spp, partials };
@@ -397,7 +398,7 @@ export function sqlPageInterpolator<Project>(project: Project) {
       absUrlUnquoted: interp.absUrlUnquoted,
       absUrlUnquotedEncoded: interp.absUrlUnquotedEncoded,
       absUrlQuotedEncoded: interp.absUrlQuotedEncoded,
-      breadcrumbsSQL: interp.breadcrumbsSQL,
+      breadcrumbs: interp.breadcrumbs,
       sitePrefixed: interp.absUrlQuoted,
       md: markdownLinkFactory({ url_encode: "replace" }),
       rawSQL,

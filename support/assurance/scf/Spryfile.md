@@ -45,8 +45,7 @@ Recommended practice is to keep these values in a local, directory-scoped enviro
 
 POSIX-style example (bash/zsh):
 
-```sh
-# .envrc (bash/zsh)
+```envrc prepare-env -C ./.envrc --gitignore --descr "Generate .envrc file and add it to local .gitignore if it's not already there"
 export SPRY_DB="sqlite://scf-2025.3.sqlite.db?mode=rwc"
 export PORT=9227
 ```
@@ -110,7 +109,7 @@ If you're running SQLPage in another terminal window, use:
 After development is complete, the `dev-src.auto` can be removed and
 single-database deployment can be used:
 
-```bash deploy --descr "Generate sqlpage_files table upsert SQL and push them to SQLite"
+```bash deploy -C --descr "Generate sqlpage_files table upsert SQL and push them to SQLite"
 rm -rf dev-src.auto
 ./spry.ts spc --package --conf sqlpage/sqlpage.json | sqlite3 scf-2025.3.sqlite.db
 ```
@@ -155,7 +154,7 @@ SET resource_json = sqlpage.read_file_as_text('spry.d/auto/resource/${path}.auto
 SET page_title  = json_extract($resource_json, '$.route.caption');
 SET page_path = json_extract($resource_json, '$.route.path');
 
-/*${ctx.breadcrumbsSQL("$page_path","$page_title")}*/
+${ctx.breadcrumbs()}
 
 -- END: PARTIAL global-layout.sql
 -- this is the `${cell.info}` cell on line ${cell.startLine}
