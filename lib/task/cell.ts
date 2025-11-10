@@ -1,16 +1,13 @@
 import { z } from "jsr:@zod/zod@4";
 import {
-  CodeCell,
   fbPartialCandidate,
   fbPartialsCollection,
-  Issue,
   mdFencedBlockPartialSchema,
   notebooks,
   Playbook,
   PlaybookCodeCell,
   playbooks,
   pseudoCellsGenerator,
-  Source,
 } from "../markdown/notebook/mod.ts";
 import {
   AnnotationCatalog,
@@ -22,6 +19,7 @@ import {
   languageSpecSchema,
 } from "../universal/code.ts";
 import { Task } from "../universal/task.ts";
+import { CodeCell, Issue, Source } from "../markdown/governedmd.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -228,6 +226,51 @@ export function spawnableTDI<
           ? [pi.flags.dep]
           : pi.flags.dep)
         : undefined,
+    };
+  };
+}
+
+// use this as a "catch all" when "unknown" cells just mean "any content"
+export function anyNamedContentTDI<
+  Provenance,
+  Frontmatter extends Record<string, unknown> = Record<string, unknown>,
+  CellAttrs extends Record<string, unknown> = Record<string, unknown>,
+  I extends Issue<Provenance> = Issue<Provenance>,
+>(
+  langIfNotRegistered: (
+    cell: PlaybookCodeCell<Provenance, CellAttrs>,
+  ) => LanguageSpec = (cell) => ({
+    id: cell.language,
+    extensions: [
+      cell.language.startsWith(".") ? cell.language : "." + cell.language,
+    ],
+    comment: { line: [], block: [] },
+  }),
+): TaskDirectiveInspector<Provenance, Frontmatter, CellAttrs, I> {
+  return ({ cell }) => {
+    const language =
+      languageRegistry.values().find((lang) =>
+        lang.id == cell.language ||
+        lang.aliases?.find((a) => a == cell.language)
+      ) ?? langIfNotRegistered(cell);
+    if (!language) return false;
+    const pi = cell.parsedPI;
+    if (!pi || !pi.firstToken) return false;
+    return {
+      nature: "CONTENT",
+      identity: pi.firstToken,
+      source: cell.source,
+      language,
+      deps: pi
+        ? "dep" in pi.flags
+          ? (typeof pi.flags.dep === "boolean"
+            ? undefined
+            : typeof pi.flags.dep === "string"
+            ? [pi.flags.dep]
+            : pi.flags.dep)
+          : undefined
+        : undefined,
+      content: {},
     };
   };
 }
@@ -492,7 +535,7 @@ export class TaskDirectives<
 
     // Merge explicit + injected dependencies, ensuring uniqueness and order
     const merged = Array.from(
-      new Set([...(taskDeps ?? []), ...injected]),
+      new Set([...injected, ...(taskDeps ?? [])]),
     );
 
     // Cache and return result

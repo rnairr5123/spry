@@ -13,9 +13,14 @@ import { TaskCell } from "./cell.ts";
 
 export type LsTaskRow = {
   name: string;
-  notebook: string;
+  provenance: string;
   language: string;
   descr: string;
+  flags: {
+    isContent: boolean;
+    isInterpolatable: boolean;
+    isCapturable: boolean;
+  };
   deps?: string;
   error?: unknown;
 };
@@ -61,7 +66,7 @@ export async function ls<Provenance>(tasks: TaskCell<Provenance>[]) {
     ColumnDef<Row, Row["language"]>
   > {
     return {
-      header: "Language",
+      header: "Lang",
       format: (v) =>
         v === "head_sql"
           ? green(v)
@@ -73,29 +78,58 @@ export async function ls<Provenance>(tasks: TaskCell<Provenance>[]) {
     };
   }
 
+  function lsFlagsField<Row extends LsTaskRow>():
+    | Partial<ColumnDef<Row, Row["flags"]>>
+    | undefined {
+    return {
+      header: "Flags",
+      defaultColor: gray,
+      // deno-fmt-ignore
+      format: (v) =>
+          `${brightYellow(v.isContent ? " " : "T")} ${brightYellow(v.isInterpolatable ? "I" : " ")} ${yellow(v.isCapturable ? "C" : " ")}`,
+    };
+  }
+
   const tasksList = tasks.map((t) => {
     return {
       name: t.taskId(),
-      notebook: String(t.provenance),
+      provenance: `${String(t.provenance)}:${t.startLine}`,
       language: t.language,
       deps: (t.taskDeps?.() ?? []).join(", "),
       descr: (String(t.parsedPI?.flags["descr"]) ?? "").replace(
         "undefined",
         "",
       ),
+      flags: {
+        isContent: t.taskDirective.nature === "CONTENT",
+        isCapturable: t.parsedPI?.hasEitherFlagOfType("capture", "C")
+          ? true
+          : false,
+        isInterpolatable: t.parsedPI?.hasEitherFlagOfType("interpolate", "I")
+          ? true
+          : false,
+      },
     } satisfies LsTaskRow;
   });
 
   await new ListerBuilder<LsTaskRow>()
-    .declareColumns("name", "notebook", "language", "deps", "descr", "error")
+    .declareColumns(
+      "name",
+      "provenance",
+      "language",
+      "deps",
+      "descr",
+      "error",
+      "flags",
+    )
     .from(tasksList)
     .field("name", "name", lsTaskIdField())
+    .field("flags", "flags", lsFlagsField())
     .field("language", "language", lsLanguageField())
-    .field("deps", "deps")
-    .field("descr", "descr")
+    .field("deps", "deps", { header: "Deps" })
+    .field("descr", "descr", { header: "Description" })
     .field("error", "error", { header: "Err" })
-    .field("notebook", "notebook", lsColorPathField("Notebook"))
-    .sortBy("name").sortDir("asc")
+    .field("provenance", "provenance", lsColorPathField("Provenance"))
     .build()
     .ls(true);
 }

@@ -1,42 +1,143 @@
+import { hasFlagOfType } from "../universal/cline.ts";
+import { eventBus } from "../universal/event-bus.ts";
+import { gitignore } from "../universal/gitignore.ts";
 import { unsafeInterpolator } from "../universal/interpolate.ts";
+import { shell, ShellBusEvents } from "../universal/shell.ts";
 import {
-  errorOnlyShellEventBus,
-  shell,
-  verboseInfoShellEventBus,
-} from "../universal/shell.ts";
-import {
-  errorOnlyTaskEventBus,
   executeDAG,
   fail,
   ok,
   Task,
+  TaskExecEventMap,
   TaskExecutionPlan,
   TaskExecutorBuilder,
-  verboseInfoTaskEventBus,
 } from "../universal/task.ts";
+import { ensureTrailingNewline } from "../universal/text-utils.ts";
 import { safeJsonStringify } from "../universal/tmpl-literal-aide.ts";
 import { matchTaskNature, TaskCell, TaskDirectives } from "./cell.ts";
-import { markdownShellEventBus } from "./mdbus.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
 
-export async function executeTasks<T extends Task>(
-  plan: TaskExecutionPlan<T>,
+export type TaskExecContext = { runId: string };
+
+export type TaskExecCapture = {
+  cell: TaskCell<string>;
+  ctx: TaskExecContext;
+  interpResult: Awaited<
+    ReturnType<ReturnType<typeof execTasksState>["interpolateUnsafely"]>
+  >;
+  execResult?: Awaited<ReturnType<ReturnType<typeof shell>["auto"]>>;
+
+  text: () => string;
+  json: () => unknown;
+};
+
+export const typicalOnCapture = async (
+  ci: string,
+  tec: TaskExecCapture,
+  capturedTaskExecs: Record<string, TaskExecCapture>,
+) => {
+  if (ci.startsWith("./")) {
+    await Deno.writeTextFile(ci, ensureTrailingNewline(tec.text()));
+  } else {
+    capturedTaskExecs[ci] = tec;
+  }
+};
+
+export const gitignorableOnCapture = async (
+  ci: string,
+  tec: TaskExecCapture,
+  capturedTaskExecs: Record<string, TaskExecCapture>,
+) => {
+  if (ci.startsWith("./")) {
+    await Deno.writeTextFile(ci, ensureTrailingNewline(tec.text()));
+    const flags = tec.cell.parsedPI?.flags;
+    if (flags && hasFlagOfType(flags, "gitignore")) {
+      const gi = ci.slice("./".length);
+      if (hasFlagOfType(flags, "gitignore", "string")) {
+        await gitignore(gi, flags.gitignore);
+      } else {
+        await gitignore(gi);
+      }
+    }
+  } else {
+    capturedTaskExecs[ci] = tec;
+  }
+};
+
+export function execTasksState(
   directives: TaskDirectives<Any, Any, Any, Any>,
-  verbose?:
-    | false
-    | Parameters<typeof verboseInfoShellEventBus>[0]["style"]
-    | ReturnType<typeof markdownShellEventBus>,
-  summarize?: boolean,
+  opts?: {
+    unsafeInterp?: ReturnType<typeof unsafeInterpolator>;
+    onCapture?: (
+      ci: string,
+      tec: TaskExecCapture,
+      capturedTaskExecs: Record<string, TaskExecCapture>,
+    ) => void | Promise<void>;
+  },
 ) {
-  type Context = { runId: string };
-  const unsafeInterp = unsafeInterpolator({ safeJsonStringify });
+  const capturedTaskExecs = {} as Record<string, TaskExecCapture>;
+  const defaults: Required<typeof opts> = {
+    unsafeInterp: unsafeInterpolator({
+      directives,
+      safeJsonStringify,
+      capturedTaskExecs,
+    }),
+    onCapture: typicalOnCapture,
+  };
+  const {
+    unsafeInterp = defaults.unsafeInterp,
+    onCapture = defaults.onCapture,
+  } = opts ?? {};
+  const td = new TextDecoder();
+
+  const isCapturable = (cell: TaskCell<string>) =>
+    cell.parsedPI &&
+    ("capture" in cell.parsedPI.flags || "C" in cell.parsedPI.flags);
+
+  const prepTaskExecCapture = (
+    tec: Pick<TaskExecCapture, "cell" | "ctx" | "interpResult" | "execResult">,
+  ) => {
+    const text = () => {
+      if (tec.execResult) {
+        if (Array.isArray(tec.execResult)) {
+          return tec.execResult.map((er) => td.decode(er.stdout)).join("\n");
+        } else {
+          return td.decode(tec.execResult.stdout);
+        }
+      } else {
+        return tec.interpResult.source;
+      }
+    };
+    const json = () => JSON.parse(text());
+    return { ...tec, text, json } satisfies TaskExecCapture;
+  };
+
+  const captureTaskExec = async (cap: TaskExecCapture) => {
+    const { cell: { parsedPI } } = cap;
+    const captureFlags = [
+      parsedPI?.flags.capture,
+      parsedPI?.flags.C,
+    ].filter((v) => v !== undefined);
+
+    const captureInstructions = captureFlags.flatMap((v) =>
+      typeof v === "boolean"
+        ? [parsedPI?.firstToken]
+        : Array.isArray(v)
+        ? v
+        : [v]
+    ).filter((v) => v !== undefined);
+
+    for (const ci of captureInstructions) {
+      await onCapture(ci, cap, capturedTaskExecs);
+    }
+  };
 
   // "unsafely" means we're using JavaScript "eval"
   async function interpolateUnsafely(
     cell: TaskCell<string>,
-    ctx: Context,
+    ctx: TaskExecContext,
   ): Promise<
     & { status: false | "unmodified" | "mutated" }
     & ({ status: "mutated"; source: string } | {
@@ -59,6 +160,7 @@ export async function executeTasks<T extends Task>(
       const mutated = await unsafeInterp.interpolate(source, {
         ...ctx,
         cell,
+        captured: capturedTaskExecs,
         partial: async (
           name: string,
           partialLocals?: Record<string, unknown>,
@@ -71,6 +173,7 @@ export async function executeTasks<T extends Task>(
             const { content: partial, interpolate, locals } = await found
               .content({
                 cell,
+                captured: capturedTaskExecs,
                 ...ctx,
                 ...partialLocals,
                 partial: partialCell,
@@ -91,38 +194,73 @@ export async function executeTasks<T extends Task>(
     }
   }
 
-  const sh = shell({
-    bus: verbose
-      ? typeof verbose === "string"
-        ? verboseInfoShellEventBus({ style: verbose })
-        : verbose.bus
-      : errorOnlyShellEventBus({ style: verbose ? verbose : "rich" }),
-  });
+  return {
+    isCapturable,
+    onCapture,
+    unsafeInterp,
+    interpolateUnsafely,
+    capturedTaskExecs,
+    captureTaskExec,
+    prepTaskExecCapture,
+  };
+}
 
+export type ExecTasksState = ReturnType<typeof execTasksState>;
+
+export async function executeTasks<
+  T extends Task,
+  Context extends TaskExecContext = TaskExecContext,
+>(
+  plan: TaskExecutionPlan<T>,
+  tei: ExecTasksState,
+  opts?: {
+    shellBus?: ReturnType<typeof eventBus<ShellBusEvents>>;
+    tasksBus?: ReturnType<typeof eventBus<TaskExecEventMap<T, Context>>>;
+  },
+) {
+  const { isCapturable, captureTaskExec, prepTaskExecCapture } = tei;
+
+  const sh = shell({ bus: opts?.shellBus });
   const exec = new TaskExecutorBuilder<Task, Context>()
     .handle(
-      // if is task of nature "TASK" and does not handle its own execute process
-      // then check if it's spawnable and handle spawning via shebang or Deno
       matchTaskNature("TASK"),
       async (cell, ctx) => {
-        const ir = await interpolateUnsafely(cell, ctx);
-        if (ir.status) {
-          await sh.auto(ir.source);
+        const interpResult = await tei.interpolateUnsafely(cell, ctx);
+        if (interpResult.status) {
+          const execResult = await sh.auto(interpResult.source);
+          if (isCapturable(cell)) {
+            await captureTaskExec(
+              prepTaskExecCapture({ cell, ctx, interpResult, execResult }),
+            );
+          }
           return ok(ctx);
         } else {
-          return fail(ctx, ir.error);
+          return fail(ctx, interpResult.error);
+        }
+      },
+    )
+    .handle(
+      matchTaskNature("CONTENT"),
+      async (cell, ctx) => {
+        const interpResult = await tei.interpolateUnsafely(cell, ctx);
+        if (interpResult.status) {
+          if (isCapturable(cell)) {
+            await captureTaskExec(
+              prepTaskExecCapture({
+                cell,
+                ctx,
+                interpResult,
+                /* just content, no execResult */
+              }),
+            );
+          }
+          return ok(ctx);
+        } else {
+          return fail(ctx, interpResult.error);
         }
       },
     )
     .build();
 
-  const summary = await executeDAG(plan, exec, {
-    eventBus: verbose
-      ? verboseInfoTaskEventBus<T, Context>({ style: "rich" })
-      : errorOnlyTaskEventBus<T, Context>({
-        style: verbose ? verbose : "rich",
-      }),
-  });
-  if (summarize) console.dir({ summary });
-  return summary;
+  return await executeDAG(plan, exec, { eventBus: opts?.tasksBus });
 }
