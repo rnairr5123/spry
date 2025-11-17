@@ -1,24 +1,26 @@
-// lib/markdown/flexible-cell_test.ts
-// deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@^1";
-import { remark } from "npm:remark@^15";
-import remarkGfm from "npm:remark-gfm@^4";
 import remarkFrontmatter from "npm:remark-frontmatter@^5";
-import flexibleCell, {
-  type FlexibleCellOptions,
-  parseFlexibleCellFromCode,
-} from "./flexible-cell.ts";
+import remarkGfm from "npm:remark-gfm@^4";
+import { remark } from "npm:remark@^15";
+import { ensureLanguageByIdOrAlias } from "../../universal/code.ts";
+import codeFrontmatter, {
+  type CodeFrontmatterOptions,
+  parseFrontmatterFromCode,
+} from "./code-frontmatter.ts";
 
-function pipeline(opts?: FlexibleCellOptions) {
+// deno-lint-ignore no-explicit-any
+type Any = any;
+
+function pipeline(opts?: CodeFrontmatterOptions) {
   return remark().use(remarkGfm).use(remarkFrontmatter, ["yaml"]).use(
-    flexibleCell,
+    codeFrontmatter,
     opts ?? { coerceNumbers: true },
   );
 }
 
-function codeNodes(tree: any): any[] {
-  const out: any[] = [];
-  const walk = (n: any) => {
+function codeNodes(tree: Any): Any[] {
+  const out: Any[] = [];
+  const walk = (n: Any) => {
     if (n.type === "code") out.push(n);
     if (Array.isArray(n.children)) n.children.forEach(walk);
   };
@@ -26,22 +28,23 @@ function codeNodes(tree: any): any[] {
   return out;
 }
 
-Deno.test("flexible-cell plugin ...", async (t) => {
+Deno.test("CodeFrontmatter plugin ...", async (t) => {
   await t.step("basic: bare tokens and boolean flags", () => {
     const md = "```bash first -x --flag\ncode\n```";
     const tree = pipeline().parse(md);
     pipeline().runSync(tree);
 
-    const node = codeNodes(tree)[0] as any;
-    assert(node?.data?.flexibleCell);
+    const node = codeNodes(tree)[0] as Any;
+    assert(node?.data?.codeFM);
 
-    const fc = node.data.flexibleCell;
-    assertEquals(fc.lang, "bash");
-    assertEquals(fc.pi.pos, ["first", "x", "flag"]);
+    const ec = node.data.codeFM;
+    assertEquals(ec.lang, "bash");
+    assertEquals(ec.langSpec.id, ensureLanguageByIdOrAlias("bash").id);
+    assertEquals(ec.pi.pos, ["first", "x", "flag"]);
     // flags normalized with both bare and boolean forms
-    assertEquals(fc.pi.flags.first, true);
-    assertEquals(fc.pi.flags.x, true);
-    assertEquals(fc.pi.flags.flag, true);
+    assertEquals(ec.pi.flags.first, true);
+    assertEquals(ec.pi.flags.x, true);
+    assertEquals(ec.pi.flags.flag, true);
   });
 
   await t.step(
@@ -51,11 +54,12 @@ Deno.test("flexible-cell plugin ...", async (t) => {
       const tree = pipeline().parse(md);
       pipeline().runSync(tree);
 
-      const fc = (codeNodes(tree)[0] as any).data.flexibleCell;
-      assertEquals(fc.pi.pos, ["tag", "tag", "L", "key"]);
-      assertEquals(fc.pi.flags.tag, ["alpha", "beta"]);
-      assertEquals(fc.pi.flags.L, 9 as any); // "9" remains a string from tokenization; acceptable in test
-      assertEquals(fc.pi.flags.key, "value");
+      const ec = (codeNodes(tree)[0] as Any).data.codeFM;
+      assertEquals(ec.langSpec.id, "typescript");
+      assertEquals(ec.pi.pos, ["tag", "tag", "L", "key"]);
+      assertEquals(ec.pi.flags.tag, ["alpha", "beta"]);
+      assertEquals(ec.pi.flags.L, 9 as Any);
+      assertEquals(ec.pi.flags.key, "value");
     },
   );
 
@@ -65,12 +69,13 @@ Deno.test("flexible-cell plugin ...", async (t) => {
     const tree = pipeline().parse(md);
     pipeline().runSync(tree);
 
-    const fc = (codeNodes(tree)[0] as any).data.flexibleCell;
-    assertEquals(fc.lang, "json5");
-    assertEquals(fc.attrs.priority, 5);
-    assertEquals(fc.attrs.env, "qa");
-    assertEquals(fc.attrs.note, "hello");
-    assertEquals(fc.attrs.list, [1, 2, 3]);
+    const ec = (codeNodes(tree)[0] as Any).data.codeFM;
+    assertEquals(ec.lang, "json5");
+    assertEquals(ec.langSpec.id, "json5");
+    assertEquals(ec.attrs.priority, 5);
+    assertEquals(ec.attrs.env, "qa");
+    assertEquals(ec.attrs.note, "hello");
+    assertEquals(ec.attrs.list, [1, 2, 3]);
   });
 
   await t.step("normalizeFlagKey override maps aliases", () => {
@@ -82,24 +87,13 @@ Deno.test("flexible-cell plugin ...", async (t) => {
       normalizeFlagKey: (k) => k.toLowerCase(),
     }).runSync(tree);
 
-    const pi = (codeNodes(tree)[0] as any).data.flexibleCell.pi;
+    const ec = (codeNodes(tree)[0] as Any).data.codeFM;
     // all keys normalized to lower-case
-    assertEquals(pi.pos, ["env", "e", "stage"]);
-    assertEquals(pi.flags.env, "prod");
-    assertEquals(pi.flags.e, "qa");
-    assertEquals(pi.flags.stage, true);
-  });
-
-  await t.step("storeKey override", () => {
-    const md = "```bash first {x:1}\ncode\n```";
-    const tree = pipeline({ storeKey: "cell" }).parse(md);
-    pipeline({ storeKey: "cell" }).runSync(tree);
-
-    const node = codeNodes(tree)[0] as any;
-    assert(node.data.cell);
-    assertEquals(node.data.flexibleCell, undefined);
-    assertEquals(node.data.cell.attrs.x, 1);
-    assertEquals(node.data.cell.pi.flags.first, true);
+    assertEquals(ec.langSpec.id, "python");
+    assertEquals(ec.pi.pos, ["env", "e", "stage"]);
+    assertEquals(ec.pi.flags.env, "prod");
+    assertEquals(ec.pi.flags.e, "qa");
+    assertEquals(ec.pi.flags.stage, true);
   });
 
   await t.step(
@@ -111,8 +105,8 @@ Deno.test("flexible-cell plugin ...", async (t) => {
       {
         const tree = pipeline().parse(invalid);
         pipeline().runSync(tree);
-        const fc = (codeNodes(tree)[0] as any).data.flexibleCell;
-        assertEquals(fc.attrs, {}); // ignored on error
+        const ec = (codeNodes(tree)[0] as Any).data.codeFM;
+        assertEquals(ec.attrs, {}); // ignored on error
       }
       // 'throw': parse error should propagate
       assertThrows(() => {
@@ -132,24 +126,24 @@ Deno.test("flexible-cell plugin ...", async (t) => {
       p.runSync(tree);
       p.runSync(tree);
 
-      const node = codeNodes(tree)[0] as any;
-      assertEquals(typeof node.data.flexibleCell.lang, "string");
-      assertEquals(Array.isArray(node.data.flexibleCell.pi.pos), true);
-      assertEquals(node.data.flexibleCell.attrs.x, 1);
+      const node = codeNodes(tree)[0] as Any;
+      assertEquals(typeof node.data.codeFM.lang, "string");
+      assertEquals(Array.isArray(node.data.codeFM.pi.pos), true);
+      assertEquals(node.data.codeFM.attrs.x, 1);
     },
   );
 
-  await t.step("public helper parseFlexibleCellFromCode()", () => {
+  await t.step("public helper parseFrontmatterFromCode()", () => {
     const md = "```sql --stage prod {sharded: true}\nSELECT 1;\n```";
     const tree = pipeline().parse(md);
     pipeline().runSync(tree);
 
-    const node = codeNodes(tree)[0] as any;
-    const parsed = parseFlexibleCellFromCode(node);
+    const node = codeNodes(tree)[0] as Any;
+    const parsed = parseFrontmatterFromCode(node);
     assert(parsed);
     assertEquals(parsed?.lang, "sql");
     assertEquals(parsed?.pi.flags.stage, "prod");
-    assertEquals(parsed?.attrs.sharded, true);
+    assertEquals(parsed?.attrs?.sharded, true);
   });
 
   await t.step(
@@ -159,7 +153,7 @@ Deno.test("flexible-cell plugin ...", async (t) => {
       const tree = pipeline().parse(md);
       pipeline().runSync(tree);
 
-      const pi = (codeNodes(tree)[0] as any).data.flexibleCell.pi;
+      const pi = (codeNodes(tree)[0] as Any).data.codeFM.pi;
       assertEquals(pi.pos, ["alpha", "beta", "x", "y"]);
       assertEquals(pi.flags.alpha, true);
       assertEquals(pi.flags.beta, true);
