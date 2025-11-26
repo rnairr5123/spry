@@ -86,16 +86,17 @@ import {
   magenta,
   red,
   yellow,
-} from "jsr:@std/fmt@1/colors";
+} from "@std/fmt/colors";
 import { eventBus } from "../universal/event-bus.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
 
-export type Task = {
+// deno-lint-ignore ban-types
+export type Task<Baggage extends object = {}> = {
   taskId: () => string;
   taskDeps?: () => string[] | undefined;
-};
+} & Baggage;
 
 export interface TaskExecutionPlan<T extends Task> {
   /** Tasks in the order they were defined in the notebook */

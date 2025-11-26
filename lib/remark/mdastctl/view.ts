@@ -7,19 +7,19 @@
  * - Unified tabular rows for physical "ls" style views
  */
 
-import { basename } from "@std/path";
-import type { Heading, Root, RootContent } from "types/mdast";
-import { mdastql, type MdastQlOptions } from "../mdast/query.ts";
+import type { Heading, Node, Root, RootContent } from "types/mdast";
 import {
   collectSectionsFromRoot,
   hasBelongsToSection,
 } from "../plugin/doc/doc-schema.ts";
 import {
-  hasNodeClass,
   type NodeClassMap,
+  nodeClassNDF,
 } from "../plugin/node/node-classify.ts";
 import { hasNodeIdentities } from "../plugin/node/node-identities.ts";
 import { markdownASTs, Yielded } from "./io.ts";
+
+import { selectAll } from "unist-util-select";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -48,8 +48,15 @@ export interface ViewableMarkdownAST {
   readonly fileRef: (node?: RootContent) => string;
   readonly rootId: string;
   readonly label: string;
-  readonly origin: Yielded<Awaited<ReturnType<typeof markdownASTs>>>["origin"];
-  readonly mdText: Yielded<Awaited<ReturnType<typeof markdownASTs>>>["mdText"];
+  readonly origin: Yielded<
+    Awaited<ReturnType<typeof markdownASTs>>
+  >["resource"];
+  readonly mdSrcText: Yielded<
+    Awaited<ReturnType<typeof markdownASTs>>
+  >["mdSrcText"];
+  readonly nodeSrcText: Yielded<
+    Awaited<ReturnType<typeof markdownASTs>>
+  >["nodeSrcText"];
 }
 
 export async function* viewableMarkdownASTs(
@@ -58,23 +65,15 @@ export async function* viewableMarkdownASTs(
 ) {
   for await (const md of markdownASTs(src, options)) {
     yield {
-      provenance: typeof md.origin.provenance === "string"
-        ? md.origin.provenance
-        : md.origin.provenance.path,
+      provenance: md.file.path,
       root: md.mdastRoot,
-      source: md.text,
-      fileRef: md.origin.nature === "remote-url"
-        ? (() => basename(md.origin.label))
-        : ((node) => {
-          const file = basename(md.origin.label);
-          const line = node?.position?.start?.line;
-          if (typeof line !== "number") return file;
-          return `${file}:${line}`;
-        }),
-      rootId: `${md.origin.label}#root`,
-      label: md.origin.label,
-      origin: md.origin,
-      mdText: md.mdText,
+      source: md.mdSrcText,
+      fileRef: md.fileRef,
+      rootId: `${md.file.path}#root`,
+      label: md.resource.provenance.label ?? md.file.path,
+      nodeSrcText: md.nodeSrcText,
+      mdSrcText: md.mdSrcText,
+      origin: md.resource,
     } satisfies ViewableMarkdownAST;
   }
 }
@@ -112,6 +111,7 @@ export interface TabularRow {
   readonly id: number;
   readonly file: string;
   readonly type: RootContent["type"];
+  readonly node: Node;
   readonly depth: number;
   readonly headingPath: string;
   readonly name: string;
@@ -130,7 +130,6 @@ export interface TabularRow {
 export interface BuildMdAstTabularRowsOptions {
   readonly includeDataKeys?: boolean;
   readonly query?: string;
-  readonly mdastqlOptions?: MdastQlOptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,28 +186,26 @@ export function walkTree(
 }
 
 /**
- * mdastql-backed selection helper.
+ * unist-util-select-backed selection helper.
  *
  * - If query is undefined → returns every node in depth-first order.
- * - If query is provided  → returns mdastql matches.
+ * - If query is provided  → returns unist-util-select matches.
  */
 export function selectNodes(
   root: Root,
   query: string | undefined,
-  options?: MdastQlOptions,
-): RootContent[] {
+) {
   if (!query) {
     const out: RootContent[] = [];
     walkTree(root, (node) => out.push(node));
     return out;
   }
-  const { nodes } = mdastql(root, query, options);
-  return [...nodes];
+  return selectAll(query, root);
 }
 
 function markNodesContainingSelected(
   root: Root,
-  selected: Set<RootContent>,
+  selected: Set<Node>,
 ): WeakMap<RootContent, boolean> {
   const map = new WeakMap<RootContent, boolean>();
 
@@ -291,7 +288,7 @@ export function summarizeNode(node: RootContent): string {
 export function formatNodeClasses(
   node: RootContent,
 ): string | undefined {
-  if (!hasNodeClass(node)) return undefined;
+  if (!nodeClassNDF.is(node)) return undefined;
 
   // We don’t care about the specific baggage shape here, just that it’s an object.
   const classMap = node.data.class as NodeClassMap<Record<string, unknown>>;
@@ -383,7 +380,7 @@ export interface BuildMdAstTreeRowsOptions {
    * For "physical" view:
    *   - if provided, we compute which tree nodes contain any of these.
    */
-  readonly selectedNodes?: RootContent[];
+  readonly selectedNodes?: Node[];
 
   /**
    * For "physical" view:
@@ -497,8 +494,8 @@ function buildPhysicalTabularRows(
   opts: BuildMdAstTabularRowsOptions = {},
 ): TabularRow[] {
   const { root, fileRef } = pmt;
-  const { includeDataKeys, query, mdastqlOptions } = opts;
-  const selected = selectNodes(root, query, mdastqlOptions);
+  const { includeDataKeys, query } = opts;
+  const selected = selectNodes(root, query);
   const selectedSet = new Set(selected);
 
   const rows: TabularRow[] = [];
@@ -540,6 +537,7 @@ function buildPhysicalTabularRows(
       id: id++,
       file: fileRef(node),
       type: node.type,
+      node,
       depth,
       headingPath,
       name,
@@ -565,8 +563,8 @@ function buildIdentifierTabularRows(
   opts: BuildMdAstTabularRowsOptions = {},
 ): TabularRow[] {
   const { root, fileRef } = pmt;
-  const { includeDataKeys, query, mdastqlOptions } = opts;
-  const selected = selectNodes(root, query, mdastqlOptions);
+  const { includeDataKeys, query } = opts;
+  const selected = selectNodes(root, query);
   const selectedSet = new Set(selected);
 
   const rows: TabularRow[] = [];
@@ -605,6 +603,7 @@ function buildIdentifierTabularRows(
           id: id++,
           file: fileRef(node),
           type: node.type,
+          node,
           depth,
           headingPath,
           name,
@@ -781,7 +780,7 @@ function buildClassIndex(
   const index = new Map<string, Map<string, ClassNodeInfo[]>>();
 
   const visit = (node: RootContent) => {
-    if (!hasNodeClass(node)) return;
+    if (!nodeClassNDF.is(node)) return;
 
     const classMap = node.data.class as NodeClassMap<Record<string, unknown>>;
 
