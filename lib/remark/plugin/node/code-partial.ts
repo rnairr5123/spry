@@ -32,13 +32,18 @@
  */
 
 import { globToRegExp, isGlob, normalize } from "@std/path";
-import { z, ZodType } from "@zod";
-import type { Code, Root, RootContent } from "types/mdast";
+import { z, ZodType } from "@zod/zod";
+import type { Code, Node, Root, RootContent } from "types/mdast";
+import { Plugin } from "unified";
 import { jsonToZod } from "../../../universal/zod-aide.ts";
+import { flexibleNodeIssues } from "../../mdast/issue.ts";
 import {
-  CodeWithFrontmatterData,
+  DataSupplierNode,
+  safeNodeDataFactory,
+} from "../../mdast/safe-data.ts";
+import {
+  codeFrontmatterNDF,
   CodeWithFrontmatterNode,
-  isCodeWithFrontmatterNode,
 } from "./code-frontmatter.ts";
 
 /** Render function for partials */
@@ -83,29 +88,27 @@ export const codePartialSchema = z.object({
 
 export type CodePartial = z.infer<typeof codePartialSchema>;
 
-export const CODE_PARTIAL_STORE_KEY = "codePartial" as const;
+export const CODEPARTIAL_KEY = "codePartial" as const;
+export type CodePartialKey = typeof CODEPARTIAL_KEY;
+export const codePartialIssues = flexibleNodeIssues("issues");
+export const codePartialSNDF = safeNodeDataFactory<CodePartialKey, CodePartial>(
+  CODEPARTIAL_KEY,
+  codePartialSchema,
+  {
+    onAttachSafeParseError: ({ node, error }) => {
+      codePartialIssues.add(node, {
+        severity: "error",
+        message: String(error),
+        error,
+      });
+      return null;
+    },
+  },
+);
 
-export type CodePartialNode = Code & {
-  data:
-    & { readonly codePartial: CodePartial }
-    & CodeWithFrontmatterData;
-};
-
-/**
- * Type guard: returns true if a `RootContent` node is a `code` node
- * that already carries CodePartialData at the default store key.
- */
-export function isCodePartialNode(
-  node: RootContent,
-): node is CodePartialNode {
-  if (
-    node.type === "code" && node.data &&
-    CODE_PARTIAL_STORE_KEY in node.data
-  ) {
-    return true;
-  }
-  return false;
-}
+export type CodePartialNode<N extends Node = Code> =
+  & CodeWithFrontmatterNode<N>
+  & DataSupplierNode<N, CodePartialKey, CodePartial>;
 
 export interface CodePartialsOptions {
   /**
@@ -163,15 +166,17 @@ export function typicalIsCodePartialNode(
  * remark().use(codeFrontmatter).use(codePartials, { collect });
  * ```
  */
-export default function codePartials(options?: CodePartialsOptions) {
+export const codePartials: Plugin<[CodePartialsOptions?], Root> = (
+  options = {},
+) => {
   const { collect, isPartial = typicalIsCodePartialNode, registerIssue } =
-    options ?? {};
+    options;
 
   return function transformer(tree: Root) {
     const walk = (node: Root | RootContent): void => {
       if (node.type === "code") {
-        if (isCodePartialNode(node)) return;
-        if (isCodeWithFrontmatterNode(node)) {
+        if (codePartialSNDF.is(node)) return;
+        if (codeFrontmatterNDF.is(node)) {
           const ipn = isPartial(node);
           if (ipn) {
             const cp = codePartial(
@@ -186,8 +191,7 @@ export default function codePartials(options?: CodePartialsOptions) {
                   : undefined,
               },
             );
-            // deno-lint-ignore no-explicit-any
-            (node.data as any)[CODE_PARTIAL_STORE_KEY] = cp;
+            codePartialSNDF.attach(node, cp);
             collect?.(node as CodePartialNode);
           }
         }
@@ -204,7 +208,7 @@ export default function codePartials(options?: CodePartialsOptions) {
 
     walk(tree);
   };
-}
+};
 
 /**
  * Build a (possibly injectable) Partial from the fenced block’s `PI` and `content`.
@@ -468,3 +472,5 @@ export function codePartialsCollection() {
     findInjectableForPath,
   };
 }
+
+export default codePartials;

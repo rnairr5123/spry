@@ -7,7 +7,7 @@
  *   `node.data[codeAnns] = [{ language, annotations, annsCatalog }]`
  */
 
-import { z } from "@zod";
+import { z } from "@zod/zod";
 import type { Code, Root, RootContent } from "types/mdast";
 import { visit } from "unist-util-visit";
 import {
@@ -18,7 +18,8 @@ import {
   getLanguageByIdOrAlias,
   type LanguageSpec,
 } from "../../../universal/code.ts";
-import { isCodeWithFrontmatterNode } from "./code-frontmatter.ts";
+import { DataSupplierNode, nodeDataFactory } from "../../mdast/safe-data.ts";
+import { codeFrontmatterNDF } from "./code-frontmatter.ts";
 
 /** The structured enrichment attached to a code node by this plugin. */
 export type CodeAnnotations<Anns extends Record<string, unknown>> = {
@@ -28,16 +29,14 @@ export type CodeAnnotations<Anns extends Record<string, unknown>> = {
 };
 
 export const CODEANNS_KEY = "codeAnns" as const;
-export type CodeWithAnnotationsData<Anns extends Record<string, unknown>> = {
-  readonly codeAnns: CodeAnnotations<Anns>;
-  [key: string]: unknown;
-};
+export type CodeAnnsKey = typeof CODEANNS_KEY;
+export const codeAnnsNDF = nodeDataFactory<
+  CodeAnnsKey,
+  CodeAnnotations<Record<string, unknown>>
+>(CODEANNS_KEY);
 
 export type CodeWithAnnotationsNode<Anns extends Record<string, unknown>> =
-  & Code
-  & {
-    data: CodeWithAnnotationsData<Anns>;
-  };
+  DataSupplierNode<Code, CodeAnnsKey, CodeAnnotations<Anns>>;
 
 /**
  * Type guard: returns true if a `RootContent` node is a `code` node
@@ -120,7 +119,7 @@ export function defaultIngest(
   schema?: z.ZodType;
 } {
   // Case: rely on code-frontmatter
-  if (!isCodeWithFrontmatterNode(code)) return false;
+  if (!codeFrontmatterNDF.is(code)) return false;
   const { codeFM } = code.data;
 
   const flags = codeFM?.pi?.flags ?? {};

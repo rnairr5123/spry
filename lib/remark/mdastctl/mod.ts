@@ -11,7 +11,7 @@ import { HelpCommand } from "@cliffy/command/help";
 
 import { bold, cyan, gray, magenta, red, yellow } from "@std/fmt/colors";
 
-import type { Heading, RootContent } from "types/mdast";
+import type { Code, Heading, Node } from "types/mdast";
 
 import { ListerBuilder } from "../../universal/lister-tabular-tui.ts";
 import { TreeLister } from "../../universal/lister-tree-tui.ts";
@@ -27,6 +27,9 @@ import {
 
 import { doctor } from "../../universal/doctor.ts";
 import { computeSemVerSync } from "../../universal/version.ts";
+import { ImportedContentNode } from "../plugin/node/code-import.ts";
+import { codeImportInsertsNDF } from "../plugin/node/code-insert.ts";
+import { Yielded } from "./io.ts";
 
 // ---------------------------------------------------------------------------
 // CLI wiring
@@ -101,12 +104,7 @@ export class CLI {
       ...(positional.length ? positional : defaults),
     ];
     if (merged.length > 0) {
-      yield* viewableMarkdownASTs(merged, {
-        onError: (src, error) => {
-          console.error({ src, error });
-          return false;
-        },
-      });
+      yield* viewableMarkdownASTs(merged);
     }
   }
 
@@ -119,6 +117,7 @@ export class CLI {
       .command("tree", this.treeCommand())
       .command("class", this.classCommand())
       .command("schema", this.schemaCommand())
+      .command("imports", this.importsCommand())
       .command("md", this.mdCommand());
   }
 
@@ -223,17 +222,115 @@ export class CLI {
             });
           }
 
-          const ids: Array<keyof TabularRow & string> = [
-            "id",
-            "file",
-            "type",
-            "depth",
-            "headingPath",
-            "name",
-            "classInfo",
-          ];
-          if (options.data) ids.push("dataKeys");
-          builder.select(...ids);
+          if (options.data) {
+            builder.select(
+              "id",
+              "file",
+              "type",
+              "depth",
+              "headingPath",
+              "name",
+              "classInfo",
+              "dataKeys",
+            );
+          } else {
+            builder.select(
+              "id",
+              "file",
+              "type",
+              "depth",
+              "headingPath",
+              "name",
+              "classInfo",
+            );
+          }
+
+          const lister = builder.build();
+          await lister.ls(true);
+        },
+      );
+  }
+
+  importsCommand(cmdName = "imports") {
+    return this.baseCommand({ examplesCmd: cmdName })
+      .description(`list imported mdast nodes`)
+      .arguments("[paths...:string]")
+      .option("--data", "Include node.data keys as a DATA column.")
+      .option("--no-color", "Show output without using ANSI colors")
+      .action(
+        async (options, ...paths: string[]) => {
+          const makeInsert = (
+            viewable: Yielded<ReturnType<typeof this.viewableMarkdownASTs>>,
+            n: ImportedContentNode<Code>,
+          ) => ({
+            importedCode: n,
+            file: viewable.fileRef(n),
+            lang: n.lang ?? "?",
+            meta: n.meta ?? "?",
+            dataKeys: Object.keys(n.data).join(", "),
+          });
+
+          const inserts: Array<ReturnType<typeof makeInsert>> = [];
+          for await (
+            const viewable of this.viewableMarkdownASTs(
+              this.conf?.ensureGlobalFiles,
+              paths,
+              this.conf?.defaultFiles ?? [],
+            )
+          ) {
+            const cii = codeImportInsertsNDF.collectNodes<Code>(viewable.root);
+            inserts.push(
+              ...cii.flatMap((i) =>
+                i.data.importInserts.nodes.map((n) => makeInsert(viewable, n))
+              ),
+            );
+          }
+
+          // 3. `inserts` is fully typed here
+          if (inserts.length === 0) {
+            console.log(gray("No imported nodes found."));
+            return;
+          }
+
+          const useColor = options.color;
+
+          const builder = new ListerBuilder<typeof inserts[number]>()
+            .from(inserts)
+            .declareColumns("file", "lang", "meta", "dataKeys")
+            .requireAtLeastOneColumn(true)
+            .color(useColor)
+            .header(true)
+            .compact(false);
+
+          builder.field("file", "file", {
+            header: "FILE",
+            defaultColor: gray,
+          });
+          builder.field("lang", "lang", {
+            header: "LANG",
+            defaultColor: cyan,
+          });
+          builder.field("meta", "meta", {
+            header: "META",
+            defaultColor: yellow,
+          });
+          // builder.field("imported", "imported", {
+          //   header: "IMPORTED",
+          //   defaultColor: brightYellow,
+          // });
+          // builder.field("isRefToBinary", "isRefToBinary", {
+          //   header: "BIN?",
+          //   defaultColor: brightYellow,
+          // });
+          // builder.field("isContentAcquired", "isContentAcquired", {
+          //   header: "📃?",
+          //   defaultColor: brightYellow,
+          // });
+          builder.field("dataKeys", "dataKeys", {
+            header: "DATA",
+            defaultColor: magenta,
+          });
+          builder.select("lang", "meta", "file", "dataKeys");
 
           const lister = builder.build();
           await lister.ls(true);
@@ -361,7 +458,8 @@ export class CLI {
             "classInfo",
           ];
           if (options.data) ids.push("dataKeys");
-          builder.select(...ids);
+          // deno-lint-ignore no-explicit-any
+          builder.select(...ids as any);
 
           const lister = builder.build();
           await lister.ls(true);
@@ -723,7 +821,7 @@ export class CLI {
       .arguments("[paths...:string]")
       .option(
         "--select <query:string>",
-        "mdastql selection (required – which nodes to emit as Markdown).",
+        "mdastql selection (required - which nodes to emit as Markdown).",
       )
       .option(
         "--section",
@@ -740,7 +838,7 @@ export class CLI {
         const sectionMode = !!options.section;
 
         for await (
-          const { root, mdText, source } of this.viewableMarkdownASTs(
+          const { root, nodeSrcText, source } of this.viewableMarkdownASTs(
             this.conf?.ensureGlobalFiles,
             paths,
             this.conf?.defaultFiles ?? [],
@@ -751,7 +849,7 @@ export class CLI {
           if (!sectionMode) {
             // Simple mode: just slice each selected node from source
             for (const node of nodes) {
-              const snippet = mdText.sliceForNode(node);
+              const snippet = nodeSrcText.sliceForNode(node);
               if (snippet) allChunks.push(snippet);
             }
             continue;
@@ -759,7 +857,7 @@ export class CLI {
 
           // SECTION mode: expand selected headings into sections.
           const headings: Heading[] = [];
-          const nonHeadingNodes: RootContent[] = [];
+          const nonHeadingNodes: Node[] = [];
 
           for (const node of nodes) {
             if (node.type === "heading") {
@@ -769,7 +867,7 @@ export class CLI {
             }
           }
 
-          const sectionRanges = mdText.sectionRangesForHeadings(headings);
+          const sectionRanges = nodeSrcText.sectionRangesForHeadings(headings);
           if (sectionRanges.length > 0) {
             // We have at least one bona fide section in this file: emit only sections.
             for (const r of sectionRanges) {
@@ -778,7 +876,7 @@ export class CLI {
           } else {
             // No usable sections: fall back to per-node snippets for all selected nodes.
             for (const node of nodes) {
-              const snippet = mdText.sliceForNode(node);
+              const snippet = nodeSrcText.sliceForNode(node);
               if (snippet) allChunks.push(snippet);
             }
           }
